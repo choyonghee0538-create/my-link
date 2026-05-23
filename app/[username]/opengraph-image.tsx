@@ -1,6 +1,4 @@
 import { ImageResponse } from "next/og"
-import { db } from "@/lib/firebase"
-import { doc, getDoc, collection, getDocs, query, collectionGroup, where } from "firebase/firestore"
 
 export const alt = "My Link Profile"
 export const size = { width: 1200, height: 630 }
@@ -8,7 +6,6 @@ export const contentType = "image/png"
 
 // Noto Sans KR TTF 폰트를 직접 가져오는 함수 (Vercel 배포 환경 500 에러 해결)
 async function getNotoSansKR() {
-  // Google Fonts API CSS 우회: Vercel 서버리스 환경에서 정규식 파싱이 실패하는 것을 방지하기 위해 TTF 다이렉트 URL 사용
   const url = "https://fonts.gstatic.com/s/notosanskr/v39/PbyxFmXiEBPT4ITbgNA5Cgms3VYcOA-vvnIzzg01eLTq8H4gReI.ttf"
   
   const response = await fetch(url)
@@ -31,39 +28,50 @@ export default async function Image({
   let linksCount = 0
 
   try {
+    const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    if (!projectId) {
+      console.warn("Missing FIREBASE_PROJECT_ID")
+      throw new Error("Missing config")
+    }
+
+    // Firebase REST API를 사용하여 Vercel Serverless 환경에서의 Firebase SDK 충돌/500 에러 완벽 방지
     // 1. Username으로 UID 조회
-    const usernameRef = doc(db, "usernames", username)
-    const usernameSnap = await getDoc(usernameRef)
+    const usernameUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/usernames/${username}`
+    const usernameRes = await fetch(usernameUrl, { cache: 'no-store' })
     
-    if (usernameSnap.exists()) {
-      userId = usernameSnap.data().uid
-    } else {
-      const profileQuery = query(collectionGroup(db, "profile"), where("username", "==", username))
-      const profileQuerySnap = await getDocs(profileQuery)
-      if (!profileQuerySnap.empty) {
-        userId = profileQuerySnap.docs[0].ref.parent.parent?.id
-      }
+    if (usernameRes.ok) {
+      const usernameDoc = await usernameRes.json()
+      userId = usernameDoc.fields?.uid?.stringValue
+    } else if (usernameRes.status === 404) {
+      // 만약 usernames 컬렉션에 없다면 fallback으로 username을 userId로 간주 (기존 fallback 로직)
+      userId = username
     }
 
     // 2. 프로필 및 링크 통계 조회
     if (userId) {
-      const profileRef = doc(db, "users", userId, "profile", "info")
-      const profileSnap = await getDoc(profileRef)
+      const profileUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/users/${userId}/profile/info`
+      const profileRes = await fetch(profileUrl, { cache: 'no-store' })
       
-      if (profileSnap.exists()) {
-        const data = profileSnap.data()
-        profile.name = data.name || username
-        profile.avatarUrl = data.avatarUrl || ""
-        profile.bio = data.bio || ""
+      if (profileRes.ok) {
+        const profileDoc = await profileRes.json()
+        const fields = profileDoc.fields || {}
+        profile.name = fields.name?.stringValue || username
+        profile.avatarUrl = fields.avatarUrl?.stringValue || ""
+        profile.bio = fields.bio?.stringValue || ""
       }
 
-      const linksRef = collection(db, "users", userId, "links")
-      const linksSnap = await getDocs(linksRef)
-      linksSnap.forEach((docSnap) => {
-        if (docSnap.data().isActive !== false) {
-          linksCount++
-        }
-      })
+      const linksUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/users/${userId}/links`
+      const linksRes = await fetch(linksUrl, { cache: 'no-store' })
+      if (linksRes.ok) {
+        const linksData = await linksRes.json()
+        const documents = linksData.documents || []
+        documents.forEach((doc: any) => {
+          const isActive = doc.fields?.isActive?.booleanValue
+          if (isActive !== false) {
+            linksCount++
+          }
+        })
+      }
     }
   } catch (error) {
     console.error("OG Image 데이터 조회 오류:", error)
