@@ -4,6 +4,7 @@ import React, { useEffect, useState, useRef, Suspense } from "react"
 import Image from "next/image"
 import NextLink from "next/link"
 import { useTheme } from "next-themes"
+import LandingPage from "@/components/LandingPage"
 import { dummyLinks, LinkItem } from "@/data/links"
 import { Card, CardTitle } from "@/components/ui/card"
 import { useSearchParams } from "next/navigation"
@@ -714,6 +715,31 @@ function MyLinkApp() {
 
   if (!mounted) {
     return null
+  }
+
+  // 완전 비로그인 상태의 최상위 메인 접속 (query param 없음) -> 마케팅 랜딩 페이지
+  if (!loading && !user && !queryUid) {
+    return (
+      <div className="relative min-h-screen w-full flex flex-col font-sans bg-slate-955">
+        <header className="sticky top-0 z-40 w-full border-b border-cyan-500/10 bg-slate-950/80 backdrop-blur-md px-6 py-4 flex items-center justify-between shadow-lg shadow-cyan-950/10">
+          <div className="flex items-center gap-2.5">
+            <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-cyan-500/20 text-white font-mono font-bold text-lg border border-cyan-400/20">
+              &gt;_
+            </div>
+            <h1 className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-2 font-mono">
+              My Link
+            </h1>
+          </div>
+          <Button
+            onClick={handleGoogleLogin}
+            className="cursor-pointer bg-slate-950 border border-cyan-500/30 hover:border-cyan-400 text-cyan-400 text-xs font-mono font-bold h-9 px-5 rounded-lg shadow-[0_0_8px_rgba(6,182,212,0.15)] hover:shadow-[0_0_12px_rgba(6,182,212,0.3)] active:scale-95 transition-all"
+          >
+            로그인 / 시작하기
+          </Button>
+        </header>
+        <LandingPage onLogin={handleGoogleLogin} />
+      </div>
+    )
   }
 
   return (
