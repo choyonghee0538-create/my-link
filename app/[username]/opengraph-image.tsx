@@ -6,33 +6,16 @@ export const alt = "My Link Profile"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
 
-// Google Fonts에서 TTF 폰트를 동적으로 가져오는 함수
+// Noto Sans KR TTF 폰트를 직접 가져오는 함수 (Vercel 배포 환경 500 에러 해결)
 async function getNotoSansKR() {
-  const url = `https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700`
-  const css = await fetch(url, {
-    headers: {
-      // WOFF2 대신 TTF를 강제하기 위해 구형 User-Agent 사용
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_8; de-at) AppleWebKit/533.21.1 (KHTML, like Gecko) Version/5.0.5 Safari/533.21.1",
-    },
-  }).then((res) => res.text())
-
-  // 700(Bold) 폰트 버퍼 파싱
-  const boldResource = css.match(/font-weight: 700[\s\S]*?src: url\((.+?)\) format\('(opentype|truetype)'\)/)
-  const regularResource = css.match(/font-weight: 400[\s\S]*?src: url\((.+?)\) format\('(opentype|truetype)'\)/)
-
-  // 700 폰트 (메인)
-  let fontData = null
-  if (boldResource) {
-    const response = await fetch(boldResource[1])
-    if (response.status === 200) {
-      fontData = await response.arrayBuffer()
-    }
-  }
+  // Google Fonts API CSS 우회: Vercel 서버리스 환경에서 정규식 파싱이 실패하는 것을 방지하기 위해 TTF 다이렉트 URL 사용
+  const url = "https://fonts.gstatic.com/s/notosanskr/v39/PbyxFmXiEBPT4ITbgNA5Cgms3VYcOA-vvnIzzg01eLTq8H4gReI.ttf"
   
-  // 400 폰트를 못 찾으면 그냥 700 리턴
-  if (!fontData) throw new Error("Failed to load font data")
-  return fontData
+  const response = await fetch(url)
+  if (response.status === 200) {
+    return await response.arrayBuffer()
+  }
+  throw new Error("Failed to load font data")
 }
 
 export default async function Image({
