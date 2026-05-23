@@ -53,7 +53,13 @@ import {
   query,
   orderBy,
   writeBatch,
+  serverTimestamp, // 추가됨
 } from "firebase/firestore"
+
+// Firestore 특화 데이터 모델 정의 (타입 안전성 보장)
+interface FirestoreLinkItem extends LinkItem {
+  createdAt?: any
+}
 
 // 커스텀 Instagram 아이콘 컴포넌트
 const InstagramIcon = ({ className, ...props }: React.ComponentProps<"svg">) => (
@@ -139,7 +145,7 @@ export default function Page() {
   const [mounted, setMounted] = useState(false)
 
   // 상태 관리 (State Management)
-  const [links, setLinks] = useState<LinkItem[]>([])
+  const [links, setLinks] = useState<FirestoreLinkItem[]>([])
   const [profile, setProfile] = useState({
     name: "데브 로그 (DevLog) ⚡",
     bio: "오픈소스 기여, AI 트렌드, 그리고 프론트엔드 아키텍처에 관심이 많은 테크 크리에이터입니다. 최신 정보는 아래 링크에서 확인하세요!",
@@ -159,24 +165,26 @@ export default function Page() {
   useEffect(() => {
     setMounted(true)
 
-    // users/anonymous/links 컬렉션을 order 필드 기준으로 정렬하여 구독
+    // users/anonymous/links 컬렉션을 createdAt 필드 기준으로 내림차순(최신순, desc) 정렬하여 구독
     const linksRef = collection(db, "users/anonymous/links")
-    const q = query(linksRef, orderBy("order", "asc"))
+    const q = query(linksRef, orderBy("createdAt", "desc"))
 
     const unsubscribe = onSnapshot(q, async (snapshot) => {
-      // 1. 만약 데이터가 아예 없다면 dummyLinks를 최초 데이터로 자동 시딩 (Wow Factor 1)
+      // 1. 만약 데이터가 아예 없다면 dummyLinks를 최초 데이터로 자동 시딩 (createdAt 시간차 시딩)
       if (snapshot.empty) {
         try {
           const batch = writeBatch(db)
           dummyLinks.forEach((link, idx) => {
             const docRef = doc(db, "users/anonymous/links", link.id)
+            // 인스타그램(idx=0)이 가장 최근 생성된 것처럼 보이도록 타임스탬프 역산 계산 (최신순 정렬 시 원래 순서 유지)
+            const timeOffset = (dummyLinks.length - idx) * 1000
             batch.set(docRef, {
               id: link.id,
               title: link.title,
               url: link.url,
               icon: link.icon,
               isActive: link.isActive,
-              order: idx,
+              createdAt: new Date(Date.now() + timeOffset),
             })
           })
           await batch.commit()
@@ -185,7 +193,7 @@ export default function Page() {
         }
       } else {
         // 2. 데이터가 존재한다면 상태에 매핑 연동 (실시간 양방향)
-        const loadedLinks: LinkItem[] = []
+        const loadedLinks: FirestoreLinkItem[] = []
         snapshot.forEach((docSnapshot) => {
           const data = docSnapshot.data()
           loadedLinks.push({
@@ -194,6 +202,7 @@ export default function Page() {
             url: data.url || "",
             icon: data.icon || "sparkles",
             isActive: data.isActive !== undefined ? data.isActive : true,
+            createdAt: data.createdAt, // 스왑 정렬에 필요한 타임스탬프 보존
           })
         })
         setLinks(loadedLinks)
@@ -216,7 +225,7 @@ export default function Page() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [resolvedTheme, setTheme])
 
-  // 링크 생성 핸들러 (Create -> Firestore setDoc 연동)
+  // 링크 생성 핸들러 (Create -> serverTimestamp를 이용해 최신순 등록 및 즉각 목록 갱신)
   const handleCreateLink = async (e: React.FormEvent) => {
     e.preventDefault()
 
@@ -235,7 +244,6 @@ export default function Page() {
     }
 
     const newId = Date.now().toString()
-    const nextOrder = links.length // 현재 마지막 항목 순서 배정
 
     try {
       await setDoc(doc(db, "users/anonymous/links", newId), {
@@ -244,7 +252,7 @@ export default function Page() {
         url: correctedUrl,
         icon: newIcon,
         isActive: true,
-        order: nextOrder,
+        createdAt: serverTimestamp(), // 서버 기준 타임스탬프 기록 (최신순 쿼리에 즉각 반응)
       })
 
       // 폼 초기화 및 다이얼로그 닫기
@@ -258,7 +266,7 @@ export default function Page() {
     }
   }
 
-  // 링크 활성화 ON/OFF 토글 핸들러 (Update -> Firestore updateDoc 연동)
+  // 링크 활성화 ON/OFF 토글 핸들러
   const handleToggleLink = async (id: string, currentActive: boolean) => {
     try {
       await updateDoc(doc(db, "users/anonymous/links", id), {
@@ -269,22 +277,12 @@ export default function Page() {
     }
   }
 
-  // 링크 삭제 핸들러 (Delete -> Firestore deleteDoc 및 order 순서 재인덱싱)
+  // 링크 삭제 핸들러
   const handleDeleteLink = async (id: string) => {
     if (!confirm("정말로 이 링크를 삭제하시겠습니까?")) return
 
     try {
-      // 1. 해당 문서 영구 삭제
       await deleteDoc(doc(db, "users/anonymous/links", id))
-
-      // 2. 삭제 후 남은 링크들의 order 필드를 0부터 다시 순차 매핑하여 인덱싱 일관성 보존 (Wow factor 2)
-      const remainingLinks = links.filter((link) => link.id !== id)
-      const batch = writeBatch(db)
-      remainingLinks.forEach((link, idx) => {
-        const docRef = doc(db, "users/anonymous/links", link.id)
-        batch.update(docRef, { order: idx })
-      })
-      await batch.commit()
     } catch (err) {
       console.error("Error deleting link in Firestore:", err)
       alert("링크 삭제 중 오류가 발생했습니다.")
@@ -300,7 +298,7 @@ export default function Page() {
     )
   }
 
-  // 인라인 인풋 포커스 아웃 (onBlur) 시점에 Firestore 최종 영구 커밋 (Wow factor 3 - 성능 최적화)
+  // 인라인 인풋 포커스 아웃 (onBlur) 시점에 Firestore 최종 영구 커밋
   const handleSaveFieldToFirestore = async (id: string, field: "title" | "url", value: string) => {
     try {
       await updateDoc(doc(db, "users/anonymous/links", id), {
@@ -311,7 +309,7 @@ export default function Page() {
     }
   }
 
-  // 링크 순서 위로 이동 (Up -> Firestore WriteBatch 순서 교환)
+  // 링크 순서 위로 이동 (Up -> Firestore createdAt 타임스탬프 값을 맞교환하여 최신순 상하 스왑)
   const handleMoveUp = async (index: number) => {
     if (index === 0) return
     try {
@@ -319,11 +317,14 @@ export default function Page() {
       const currentLink = links[index]
       const targetLink = links[index - 1]
 
+      if (!currentLink.createdAt || !targetLink.createdAt) return
+
       const currentRef = doc(db, "users/anonymous/links", currentLink.id)
       const targetRef = doc(db, "users/anonymous/links", targetLink.id)
 
-      batch.update(currentRef, { order: index - 1 })
-      batch.update(targetRef, { order: index })
+      // 최신순(desc) 쿼리 정렬 하에서 두 타임스탬프를 바꾸어 순서 교환 완수 (Wow Factor)
+      batch.update(currentRef, { createdAt: targetLink.createdAt })
+      batch.update(targetRef, { createdAt: currentLink.createdAt })
 
       await batch.commit()
     } catch (err) {
@@ -331,7 +332,7 @@ export default function Page() {
     }
   }
 
-  // 링크 순서 아래로 이동 (Down -> Firestore WriteBatch 순서 교환)
+  // 링크 순서 아래로 이동 (Down -> Firestore createdAt 타임스탬프 값을 맞교환하여 최신순 상하 스왑)
   const handleMoveDown = async (index: number) => {
     if (index === links.length - 1) return
     try {
@@ -339,11 +340,14 @@ export default function Page() {
       const currentLink = links[index]
       const targetLink = links[index + 1]
 
+      if (!currentLink.createdAt || !targetLink.createdAt) return
+
       const currentRef = doc(db, "users/anonymous/links", currentLink.id)
       const targetRef = doc(db, "users/anonymous/links", targetLink.id)
 
-      batch.update(currentRef, { order: index + 1 })
-      batch.update(targetRef, { order: index })
+      // 두 타임스탬프를 바꾸어 순서 교환 완수 (Wow Factor)
+      batch.update(currentRef, { createdAt: targetLink.createdAt })
+      batch.update(targetRef, { createdAt: currentLink.createdAt })
 
       await batch.commit()
     } catch (err) {
@@ -390,7 +394,7 @@ export default function Page() {
             <h1 className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-2 font-mono">
               My Link <span className="text-[10px] font-sans bg-cyan-950/60 border border-cyan-500/30 text-cyan-400 font-semibold px-2 py-0.5 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.2)]">Dev Dashboard</span>
             </h1>
-            <p className="text-[11px] text-slate-400 hidden sm:block">파이어베이스 Cloud DB(Firestore) 실시간 데이터 마이그레이션 완료</p>
+            <p className="text-[11px] text-slate-400 hidden sm:block">파이어베이스 Cloud DB(Firestore) 최신순(createdAt) 정렬 연동 완료</p>
           </div>
         </div>
 
@@ -398,7 +402,7 @@ export default function Page() {
           {/* 테마 토글 버튼 */}
           <button
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-900/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-905/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer"
             aria-label="Toggle Theme"
           >
             {resolvedTheme === "dark" ? (
@@ -490,7 +494,7 @@ export default function Page() {
                     value={profile.bio}
                     onChange={(e) => setProfile({ ...profile, bio: e.target.value.slice(0, 80) })}
                     placeholder="소개글을 입력하세요"
-                    className="bg-slate-955/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
+                    className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
                   />
                 </div>
               </div>
@@ -556,7 +560,7 @@ export default function Page() {
                             onClick={() => setNewIcon(iconOpt.value)}
                             className={`flex flex-col items-center justify-center p-2 rounded-xl border text-center transition-all cursor-pointer ${
                               newIcon === iconOpt.value
-                                ? "border-cyan-400 bg-cyan-950/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
+                                ? "border-cyan-400 bg-cyan-955/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
                                 : "border-slate-800 bg-slate-900/40 hover:bg-slate-800/40 text-slate-400"
                             }`}
                           >
@@ -681,14 +685,14 @@ export default function Page() {
           </section>
         </main>
 
-        {/* 2. 우측 실시간 모바일 프리뷰 (Firestore 데이터 실시간 연동) */}
+        {/* 2. 우측 실시간 모바일 프리뷰 (Firesotre 실시간 최신순 연동) */}
         <aside className={`w-full md:w-[380px] lg:w-[420px] h-full items-center justify-center bg-slate-950/30 md:border-l border-cyan-500/10 p-6 md:p-8 flex-col ${
           activeTab === "preview" ? "flex" : "hidden md:flex"
         }`}>
           
           <div className="text-center mb-4 hidden md:block">
             <span className="text-[10px] bg-slate-900 border border-cyan-500/25 text-cyan-400 font-semibold font-mono px-3 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_12px_rgba(6,182,212,0.15)]">
-              <Cpu className="w-3.5 h-3.5 animate-spin" /> LIVE_CLOUD_DATABASE_SYNC
+              <Cpu className="w-3.5 h-3.5 animate-spin" /> LIVE_CLOUD_SORT_SYNC
             </span>
           </div>
 
