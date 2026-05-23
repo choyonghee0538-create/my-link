@@ -3,8 +3,21 @@
 import React, { useEffect, useState } from "react"
 import Image from "next/image"
 import { useTheme } from "next-themes"
-import { dummyLinks } from "@/data/links"
+import { dummyLinks, LinkItem } from "@/data/links"
 import { Card, CardTitle } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog"
+import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
 import {
   ShoppingBag,
   BookOpen,
@@ -13,9 +26,22 @@ import {
   Sparkles,
   Sun,
   Moon,
+  Plus,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  Edit3,
+  Eye,
+  Settings2,
+  FileText,
+  Link,
+  Laptop,
+  Terminal,
+  Cpu,
+  Atom,
 } from "lucide-react"
 
-// 커스텀 Instagram 아이콘 컴포넌트
+// 커스텀 Instagram 아이콘 컴포넌트 (테크 시안 컬러 기본값)
 const InstagramIcon = ({ className, ...props }: React.ComponentProps<"svg">) => (
   <svg
     viewBox="0 0 24 24"
@@ -62,127 +88,589 @@ const GithubIcon = ({ className, ...props }: React.ComponentProps<"svg">) => (
   </svg>
 )
 
-// 아이콘 매핑 헬퍼 함수
-const getIcon = (iconName: string) => {
-  const iconClass = "h-5 w-5 transition-transform duration-300"
+// 아이콘 매핑 헬퍼 함수 (테크 시안/블루/에메랄드 조율)
+const getIcon = (iconName: string, activeColorClass?: string) => {
+  const iconClass = "h-5 w-5 transition-all duration-300 group-hover:scale-110"
   switch (iconName) {
     case "instagram":
-      return <InstagramIcon className={`${iconClass} text-pink-600 dark:text-pink-400`} />
+      return <InstagramIcon className={`${iconClass} ${activeColorClass || "text-cyan-400 dark:text-cyan-400"}`} />
     case "shopping-bag":
-      return <ShoppingBag className={`${iconClass} text-pink-500`} />
+      return <ShoppingBag className={`${iconClass} ${activeColorClass || "text-emerald-400"}`} />
     case "youtube":
-      return <YoutubeIcon className={`${iconClass} text-red-500`} />
+      return <YoutubeIcon className={`${iconClass} ${activeColorClass || "text-red-400"}`} />
     case "book-open":
-      return <BookOpen className={`${iconClass} text-emerald-500`} />
+      return <BookOpen className={`${iconClass} ${activeColorClass || "text-teal-400"}`} />
     case "github":
-      return <GithubIcon className={`${iconClass} text-slate-800 dark:text-slate-200`} />
+      return <GithubIcon className={`${iconClass} ${activeColorClass || "text-indigo-400 dark:text-indigo-300"}`} />
     case "user":
-      return <User className={`${iconClass} text-blue-500`} />
+      return <User className={`${iconClass} ${activeColorClass || "text-blue-400"}`} />
     default:
-      return <Sparkles className={`${iconClass} text-amber-500`} />
+      return <Sparkles className={`${iconClass} ${activeColorClass || "text-cyan-400 animate-pulse"}`} />
   }
 }
+
+// 아이콘 데이터 리스트 (다이얼로그에서 선택 시 사용)
+const AVAILABLE_ICONS = [
+  { value: "instagram", label: "인스타그램", color: "text-cyan-400" },
+  { value: "youtube", label: "유튜브", color: "text-red-400" },
+  { value: "github", label: "깃허브", color: "text-indigo-400 dark:text-indigo-300" },
+  { value: "book-open", label: "블로그", color: "text-teal-400" },
+  { value: "shopping-bag", label: "쇼핑/마켓", color: "text-emerald-400" },
+  { value: "user", label: "개인홈피", color: "text-blue-400" },
+  { value: "sparkles", label: "기타(별빛)", color: "text-cyan-400" },
+]
 
 export default function Page() {
   const { resolvedTheme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
+
+  // 상태 관리 - 테크 테마용 기본 데이터 세팅
+  const [links, setLinks] = useState<LinkItem[]>(dummyLinks)
+  const [profile, setProfile] = useState({
+    name: "데브 로그 (DevLog) ⚡",
+    bio: "오픈소스 기여, AI 트렌드, 그리고 프론트엔드 아키텍처에 관심이 많은 테크 크리에이터입니다. 최신 정보는 아래 링크에서 확인하세요!",
+    avatarUrl: "" // 비워두어 네온 터미널 아바타 렌더링
+  })
+
+  // UI 뷰 모드 및 추가 다이얼로그 상태
+  const [activeTab, setActiveTab] = useState<"edit" | "preview">("edit")
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+
+  // 링크 추가 폼 상태
+  const [newTitle, setNewTitle] = useState("")
+  const [newUrl, setNewUrl] = useState("")
+  const [newIcon, setNewIcon] = useState("sparkles")
 
   // Hydration mismatch 방지
   useEffect(() => {
     setMounted(true)
   }, [])
 
-  // 활성화된 링크만 필터링 (isActive: true)
-  const activeLinks = dummyLinks.filter((link) => link.isActive)
+  // 키보드로 다크 모드 토글 단축키 활성화 (d)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "d" && e.target === document.body) {
+        setTheme(resolvedTheme === "dark" ? "light" : "dark")
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [resolvedTheme, setTheme])
+
+  // 링크 생성 핸들러 (Create)
+  const handleCreateLink = (e: React.FormEvent) => {
+    e.preventDefault()
+
+    if (!newTitle.trim()) {
+      alert("링크 제목을 입력해주세요.")
+      return
+    }
+    if (!newUrl.trim()) {
+      alert("연결할 URL을 입력해주세요.")
+      return
+    }
+
+    // URL 프로토콜 누락 시 보정 및 유효성 검사
+    let correctedUrl = newUrl.trim()
+    if (!/^https?:\/\//i.test(correctedUrl)) {
+      correctedUrl = `https://${correctedUrl}`
+    }
+
+    const newLink: LinkItem = {
+      id: Date.now().toString(),
+      title: newTitle.trim(),
+      url: correctedUrl,
+      icon: newIcon,
+      isActive: true,
+    }
+
+    setLinks([...links, newLink])
+
+    // 폼 초기화 및 다이얼로그 닫기
+    setNewTitle("")
+    setNewUrl("")
+    setNewIcon("sparkles")
+    setIsAddDialogOpen(false)
+  }
+
+  // 링크 활성화 ON/OFF 토글 핸들러 (Update)
+  const handleToggleLink = (id: string) => {
+    setLinks(
+      links.map((link) =>
+        link.id === id ? { ...link, isActive: !link.isActive } : link
+      )
+    )
+  }
+
+  // 링크 삭제 핸들러 (Delete)
+  const handleDeleteLink = (id: string) => {
+    if (confirm("정말로 이 링크를 삭제하시겠습니까?")) {
+      setLinks(links.filter((link) => link.id !== id))
+    }
+  }
+
+  // 링크 필드 수정 핸들러 (인라인 실시간 편집)
+  const handleUpdateLinkField = (id: string, field: "title" | "url", value: string) => {
+    setLinks(
+      links.map((link) =>
+        link.id === id ? { ...link, [field]: value } : link
+      )
+    )
+  }
+
+  // 링크 순서 위로 이동 (Up)
+  const handleMoveUp = (index: number) => {
+    if (index === 0) return
+    const newLinks = [...links]
+    const temp = newLinks[index]
+    newLinks[index] = newLinks[index - 1]
+    newLinks[index - 1] = temp
+    setLinks(newLinks)
+  }
+
+  // 링크 순서 아래로 이동 (Down)
+  const handleMoveDown = (index: number) => {
+    if (index === links.length - 1) return
+    const newLinks = [...links]
+    const temp = newLinks[index]
+    newLinks[index] = newLinks[index + 1]
+    newLinks[index + 1] = temp
+    setLinks(newLinks)
+  }
+
+  // 활성화된 링크만 필터링 (우측 프리뷰 렌더링용)
+  const activeLinks = links.filter((link) => link.isActive)
+
+  // 테크 네온 터미널 아바타 컴포넌트 (Wow Factor)
+  const TechAvatar = ({ size = "lg" }: { size?: "sm" | "lg" }) => {
+    const isLg = size === "lg"
+    return (
+      <div className={`relative ${
+        isLg ? "w-18 h-18 sm:w-20 sm:h-20" : "w-14 h-14 sm:w-16 sm:h-16"
+      } rounded-full bg-slate-950 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.35)] flex items-center justify-center overflow-hidden group/avatar`}>
+        {/* 네온 광원 회전 레이어 */}
+        <div className="absolute inset-0 bg-gradient-to-tr from-cyan-500/20 via-transparent to-indigo-500/20 opacity-80 group-hover/avatar:rotate-180 transition-transform duration-1000" />
+        <Terminal className={`${
+          isLg ? "w-7 h-7 sm:w-8 h-8" : "w-5 h-5 sm:w-6 h-6"
+        } text-cyan-400 animate-pulse drop-shadow-[0_0_5px_rgba(34,211,238,0.5)]`} />
+        {/* 미세 그리드 데코 */}
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(18,24,38,0.1)_1px,transparent_1px),linear-gradient(90deg,rgba(18,24,38,0.1)_1px,transparent_1px)] bg-[size:4px_4px] pointer-events-none" />
+      </div>
+    )
+  }
 
   if (!mounted) {
     return null
   }
 
   return (
-    <div className="relative min-h-screen w-full overflow-x-hidden bg-gradient-to-b from-rose-50/40 via-background to-rose-50/10 dark:from-neutral-950 dark:via-background dark:to-neutral-900/50 flex flex-col justify-between p-6">
+    <div className="relative min-h-screen w-full bg-gradient-to-br from-slate-950 via-zinc-900 to-cyan-950/20 dark:from-slate-950 dark:via-neutral-950 dark:to-cyan-950/30 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-300">
       
-      {/* 테마 토글 버튼 (우측 상단 플로팅) */}
-      <div className="absolute top-4 right-4 z-50">
+      {/* 테크 배경 미세 노이즈/그리드 패턴 장식 (Wow factor 1) */}
+      <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.015)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.015)_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none z-0" />
+      
+      {/* 글로벌 상단 헤더 바 */}
+      <header className="sticky top-0 z-40 w-full border-b border-cyan-500/10 bg-slate-950/80 backdrop-blur-md px-6 py-4 flex items-center justify-between shadow-lg shadow-cyan-950/10">
+        <div className="flex items-center gap-2.5">
+          <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-cyan-500/20 text-white font-mono font-bold text-lg border border-cyan-400/20">
+            &gt;_
+          </div>
+          <div>
+            <h1 className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-2 font-mono">
+              My Link <span className="text-[10px] font-sans bg-cyan-950/60 border border-cyan-500/30 text-cyan-400 font-semibold px-2 py-0.5 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.2)]">Dev Dashboard</span>
+            </h1>
+            <p className="text-[11px] text-slate-400 hidden sm:block">테크니컬 멀티 링크 페이지를 실시간으로 구성하고 편집합니다</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* 테마 토글 버튼 */}
+          <button
+            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-900/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer"
+            aria-label="Toggle Theme"
+          >
+            {resolvedTheme === "dark" ? (
+              <Sun className="h-4.5 w-4.5 text-cyan-400 animate-pulse" />
+            ) : (
+              <Moon className="h-4.5 w-4.5 text-indigo-400" />
+            )}
+          </button>
+        </div>
+      </header>
+
+      {/* 모바일 뷰 전용 네비게이션 탭 */}
+      <div className="flex md:hidden sticky top-[73px] z-30 border-b border-cyan-500/10 bg-slate-950/90 backdrop-blur-md px-4 py-2 gap-2">
         <button
-          onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-          className="flex h-10 w-10 items-center justify-center rounded-full border border-border/60 bg-card/60 backdrop-blur-md text-foreground shadow-sm hover:scale-105 active:scale-95 transition-all duration-200 cursor-pointer"
-          aria-label="Toggle Theme"
+          onClick={() => setActiveTab("edit")}
+          className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-semibold rounded-lg transition-all duration-300 font-mono ${
+            activeTab === "edit"
+              ? "bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/20 font-bold"
+              : "text-slate-400 hover:bg-slate-900/50"
+          }`}
         >
-          {resolvedTheme === "dark" ? (
-            <Sun className="h-5 w-5 text-amber-500 animate-pulse" />
-          ) : (
-            <Moon className="h-5 w-5 text-indigo-600" />
-          )}
+          <Edit3 className="w-4 h-4" /> &gt;_ 편집 모드
+        </button>
+        <button
+          onClick={() => setActiveTab("preview")}
+          className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-semibold rounded-lg transition-all duration-300 font-mono ${
+            activeTab === "preview"
+              ? "bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/20 font-bold"
+              : "text-slate-400 hover:bg-slate-900/50"
+          }`}
+        >
+          <Eye className="w-4 h-4" /> [모바일 프리뷰]
         </button>
       </div>
 
-      {/* 메인 콘텐츠 영역 (모바일 퍼스트 세로 나열, 중앙 정렬) */}
-      <main className="flex-1 w-full max-w-md mx-auto flex flex-col items-center pt-10 pb-8">
+      {/* 대시보드 바디 (2분할 레이아웃) */}
+      <div className="flex-1 w-full max-w-7xl mx-auto flex flex-col md:flex-row h-[calc(100vh-73px)] md:h-[calc(100vh-73px)] overflow-hidden z-10">
         
-        {/* 프로필 헤더 */}
-        <div className="flex flex-col items-center text-center mb-8">
-          <div className="relative w-24 h-24 rounded-full overflow-hidden border-4 border-background shadow-xl hover:scale-105 transition-transform duration-500 ease-out group">
-            <Image
-              src="/miso_avatar.png"
-              alt="Miso Beauty Avatar"
-              fill
-              priority
-              className="object-cover group-hover:scale-110 transition-transform duration-700 ease-out"
-            />
-          </div>
-          <h1 className="mt-4 font-bold text-2xl tracking-tight text-foreground flex items-center gap-1.5">
-            미소 뷰티 🌸
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground max-w-xs leading-relaxed">
-            봄 맞이 데일리 메이크업 정보와 뷰티 팁을 공유합니다. 아래 링크에서 실시간 특가와 새로운 영상을 만나보세요!
-          </p>
-        </div>
+        {/* 1. 좌측 편집 패널 */}
+        <main className={`flex-1 h-full overflow-y-auto p-6 lg:p-8 flex flex-col gap-8 ${
+          activeTab === "edit" ? "block" : "hidden md:block"
+        }`}>
+          
+          {/* A. 프로필 설정 카드 */}
+          <section className="bg-slate-900/40 backdrop-blur-md border border-cyan-500/10 rounded-2xl p-6 shadow-xl flex flex-col gap-4">
+            <div className="flex items-center gap-2 border-b border-cyan-500/10 pb-3">
+              <Settings2 className="w-5 h-5 text-cyan-400" />
+              <h2 className="text-base font-bold text-slate-200 font-mono">system_branding_config</h2>
+            </div>
 
-        {/* 링크 카드 리스트 (세로 정렬, 중앙 정렬) */}
-        <div className="w-full flex flex-col gap-4">
-          {activeLinks.map((link) => (
-            <a
-              key={link.id}
-              href={link.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl transition-all duration-200"
-            >
-              <Card className="flex flex-row items-center p-4 gap-4 w-full cursor-pointer transition-all duration-300 hover:-translate-y-1 hover:shadow-lg active:scale-[0.98] border border-border/50 hover:border-pink-300/50 dark:hover:border-pink-500/30 bg-card/60 backdrop-blur-md shadow-sm">
+            <div className="flex flex-col sm:flex-row gap-5 items-start sm:items-center">
+              {/* 원형 아바타 (터미널 아바타 장식) */}
+              <div className="flex justify-center w-full sm:w-auto">
+                {profile.avatarUrl ? (
+                  <div className="relative w-16 h-16 rounded-full overflow-hidden border border-cyan-500 shadow-md">
+                    <Image
+                      src={profile.avatarUrl}
+                      alt="Profile Avatar"
+                      fill
+                      className="object-cover"
+                    />
+                  </div>
+                ) : (
+                  <TechAvatar size="sm" />
+                )}
+              </div>
+
+              {/* 닉네임, 소개글 입력 */}
+              <div className="flex-1 w-full grid gap-4">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="profile-name" className="text-xs text-cyan-400 font-semibold font-mono">
+                    PROMPT_NAME (닉네임 - 최대 30자)
+                  </Label>
+                  <Input
+                    id="profile-name"
+                    value={profile.name}
+                    onChange={(e) => setProfile({ ...profile, name: e.target.value.slice(0, 30) })}
+                    placeholder="프로필명을 입력하세요"
+                    className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 font-mono text-sm placeholder:text-slate-600"
+                  />
+                </div>
+
+                <div className="grid gap-1.5">
+                  <Label htmlFor="profile-bio" className="text-xs text-cyan-400 font-semibold font-mono">
+                    BIO_DESCRIPTION (한 줄 소개 - 최대 80자)
+                  </Label>
+                  <Input
+                    id="profile-bio"
+                    value={profile.bio}
+                    onChange={(e) => setProfile({ ...profile, bio: e.target.value.slice(0, 80) })}
+                    placeholder="소개글을 입력하세요"
+                    className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* B. 링크 블록 관리 패널 */}
+          <section className="flex-1 flex flex-col gap-4 min-h-[300px]">
+            <div className="flex items-center justify-between border-b border-cyan-500/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Link className="w-5 h-5 text-cyan-400" />
+                <h2 className="text-base font-bold text-slate-200 font-mono">link_block_builder</h2>
+              </div>
+
+              {/* 링크 추가 다이얼로그 (Dialog) */}
+              <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+                <DialogTrigger render={
+                  <Button className="cursor-pointer bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold font-mono gap-1.5 px-4 py-2 h-9 rounded-xl shadow-md shadow-cyan-500/10 active:scale-95 transition-all duration-200 border-none" />
+                }>
+                  <Plus className="w-4.5 h-4.5" /> ADD_NEW_BLOCK
+                </DialogTrigger>
                 
-                {/* 아이콘 컨테이너 */}
-                <div className="flex items-center justify-center w-11 h-11 rounded-full bg-secondary/80 text-foreground transition-all duration-500 group-hover:scale-110 group-hover:rotate-6 shadow-sm">
-                  {getIcon(link.icon)}
+                <DialogContent className="border border-cyan-500/20 bg-slate-950/95 backdrop-blur-xl shadow-[0_0_35px_rgba(6,182,212,0.2)] rounded-2xl max-w-sm">
+                  <DialogHeader>
+                    <DialogTitle className="text-lg font-bold text-slate-100 flex items-center gap-2 font-mono border-b border-cyan-500/10 pb-2">
+                      <Terminal className="w-5 h-5 text-cyan-400" /> create_link_block
+                    </DialogTitle>
+                  </DialogHeader>
+
+                  <form onSubmit={handleCreateLink} className="space-y-4 py-3">
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="link-title" className="text-xs font-semibold text-cyan-400 font-mono">BLOCK_TITLE (링크 제목)</Label>
+                      <Input
+                        id="link-title"
+                        placeholder="예: Github 저장소, 기술 블로그 등"
+                        value={newTitle}
+                        onChange={(e) => setNewTitle(e.target.value)}
+                        required
+                        className="bg-slate-900/60 border-cyan-500/20 text-slate-200 focus-visible:border-cyan-400 text-sm font-mono placeholder:text-slate-600"
+                      />
+                    </div>
+
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="link-url" className="text-xs font-semibold text-cyan-400 font-mono">TARGET_URL (연결 URL)</Label>
+                      <Input
+                        id="link-url"
+                        placeholder="예: github.com/username"
+                        value={newUrl}
+                        onChange={(e) => setNewUrl(e.target.value)}
+                        required
+                        className="bg-slate-900/60 border-cyan-500/20 text-slate-200 focus-visible:border-cyan-400 text-sm font-mono placeholder:text-slate-600"
+                      />
+                    </div>
+
+                    {/* 아이콘 선택 */}
+                    <div className="grid gap-2">
+                      <Label className="text-xs font-semibold text-cyan-400 font-mono">SELECT_BLOCK_ICON (아이콘)</Label>
+                      <div className="grid grid-cols-4 gap-2">
+                        {AVAILABLE_ICONS.map((iconOpt) => (
+                          <button
+                            key={iconOpt.value}
+                            type="button"
+                            onClick={() => setNewIcon(iconOpt.value)}
+                            className={`flex flex-col items-center justify-center p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                              newIcon === iconOpt.value
+                                ? "border-cyan-400 bg-cyan-950/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
+                                : "border-slate-800 bg-slate-900/40 hover:bg-slate-800/40 text-slate-400"
+                            }`}
+                          >
+                            <div className="mb-1">{getIcon(iconOpt.value, iconOpt.color)}</div>
+                            <span className="text-[10px] font-mono tracking-tighter truncate max-w-full">
+                              {iconOpt.label}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <DialogFooter className="flex sm:flex-row gap-2 pt-2 border-t border-cyan-500/10 mt-4">
+                      <DialogClose render={
+                        <Button type="button" variant="outline" className="flex-1 rounded-xl h-9 font-semibold font-mono border-slate-800 hover:bg-slate-900 text-slate-300" />
+                      }>
+                        CANCEL
+                      </DialogClose>
+                      <Button type="submit" className="flex-1 bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold font-mono rounded-xl h-9">
+                        CONFIRM
+                      </Button>
+                    </DialogFooter>
+                  </form>
+                </DialogContent>
+              </Dialog>
+            </div>
+
+            {/* 링크 리스트 카드 */}
+            {links.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-12 border border-dashed border-cyan-500/20 rounded-2xl bg-slate-950/30">
+                <FileText className="w-10 h-10 text-cyan-500/20 mb-3" />
+                <h3 className="text-sm font-semibold text-slate-400 font-mono">database_is_empty</h3>
+                <p className="text-xs text-slate-500 mt-1 max-w-xs leading-relaxed font-mono">
+                  우측 상단의 "ADD_NEW_BLOCK" 버튼을 클릭하여 테크니컬 바로가기 블록을 생성하세요.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {links.map((link, index) => (
+                  <div
+                    key={link.id}
+                    className="flex flex-col sm:flex-row items-start sm:items-center p-4 gap-4 bg-slate-900/30 backdrop-blur-xs border border-cyan-500/10 rounded-xl hover:border-cyan-500/30 hover:shadow-[0_0_15px_rgba(6,182,212,0.06)] transition-all duration-200 group"
+                  >
+                    
+                    {/* 상하 이동 순서 제어기 */}
+                    <div className="flex flex-row sm:flex-col gap-1 w-full sm:w-auto items-center justify-between sm:justify-center border-b sm:border-b-0 pb-2 sm:pb-0 border-slate-850">
+                      <div className="flex items-center gap-1 sm:flex-col">
+                        <button
+                          onClick={() => handleMoveUp(index)}
+                          disabled={index === 0}
+                          className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
+                          title="위로 이동"
+                        >
+                          <ArrowUp className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => handleMoveDown(index)}
+                          disabled={index === links.length - 1}
+                          className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
+                          title="아래로 이동"
+                        >
+                          <ArrowDown className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* 아이콘 표시 */}
+                      <div className="h-9 w-9 rounded-full bg-slate-950 border border-cyan-500/10 flex items-center justify-center shadow-xs">
+                        {getIcon(link.icon)}
+                      </div>
+                    </div>
+
+                    {/* 인라인 제목 / URL 텍스트 편집 */}
+                    <div className="flex-1 w-full grid gap-2">
+                      <div className="grid gap-1">
+                        <Input
+                          value={link.title}
+                          onChange={(e) => handleUpdateLinkField(link.id, "title", e.target.value)}
+                          placeholder="링크 제목"
+                          className="h-7 text-sm font-semibold border-none hover:bg-slate-850 focus-visible:bg-slate-800 px-1 py-0 shadow-none focus-visible:ring-0 rounded-md text-slate-200 font-mono"
+                        />
+                      </div>
+                      <div className="grid gap-1">
+                        <Input
+                          value={link.url}
+                          onChange={(e) => handleUpdateLinkField(link.id, "url", e.target.value)}
+                          placeholder="연결 URL (예: https://example.com)"
+                          className="h-6 text-xs text-cyan-400/80 border-none hover:bg-slate-850 focus-visible:bg-slate-800 px-1 py-0 shadow-none focus-visible:ring-0 rounded-md font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    {/* 노출 스위치 및 삭제 버튼 */}
+                    <div className="flex items-center justify-between w-full sm:w-auto gap-4 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-850">
+                      
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-400 font-semibold font-mono">
+                          {link.isActive ? "ACTIVE" : "HIDDEN"}
+                        </span>
+                        <Switch
+                          checked={link.isActive}
+                          onCheckedChange={() => handleToggleLink(link.id)}
+                          aria-label="Toggle link active state"
+                          className="data-checked:bg-cyan-500"
+                        />
+                      </div>
+
+                      <button
+                        onClick={() => handleDeleteLink(link.id)}
+                        className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer"
+                        title="링크 삭제"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </main>
+
+        {/* 2. 우측 실시간 모바일 프리뷰 (사이버 글래스 테마 장착) */}
+        <aside className={`w-full md:w-[380px] lg:w-[420px] h-full items-center justify-center bg-slate-950/30 md:border-l border-cyan-500/10 p-6 md:p-8 flex-col ${
+          activeTab === "preview" ? "flex" : "hidden md:flex"
+        }`}>
+          
+          <div className="text-center mb-4 hidden md:block">
+            <span className="text-[10px] bg-slate-900 border border-cyan-500/25 text-cyan-400 font-semibold font-mono px-3 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_12px_rgba(6,182,212,0.15)]">
+              <Cpu className="w-3.5 h-3.5 animate-spin" /> LIVE_CELLULAR_PREVIEW
+            </span>
+          </div>
+
+          {/* 스마트폰 기기 프레임 데코레이션 (네온 글로우 & 메탈릭 쉘) */}
+          <div className="relative w-[300px] sm:w-[320px] h-[580px] sm:h-[620px] rounded-[42px] border-[10px] border-slate-900 bg-slate-950 shadow-[0_0_35px_rgba(6,182,212,0.12)] flex flex-col justify-between overflow-hidden ring-1 ring-cyan-500/20">
+            
+            {/* 다이내믹 아일랜드 노치 */}
+            <div className="absolute top-2.5 left-1/2 -translate-x-1/2 w-28 h-5.5 bg-slate-900 rounded-full z-50 flex items-center justify-between px-3 shadow-inner border border-slate-800">
+              <div className="w-2.5 h-2.5 bg-slate-800 rounded-full flex items-center justify-center">
+                <div className="w-1.5 h-1.5 bg-cyan-900 rounded-full" />
+              </div>
+              <div className="w-10 h-1.5 bg-slate-800 rounded-full" />
+            </div>
+
+            {/* 모바일 화면 상단 그라데이션 및 바디 콘텐츠 */}
+            <div className="flex-1 overflow-y-auto scrollbar-none flex flex-col pt-12 pb-6 px-4 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950">
+              
+              {/* 모바일 프로필 헤더 */}
+              <div className="flex flex-col items-center text-center mb-6">
+                <div className="relative w-18 h-18 rounded-full flex items-center justify-center border border-cyan-500/30 p-0.5 shadow-[0_0_12px_rgba(6,182,212,0.2)]">
+                  {profile.avatarUrl ? (
+                    <div className="relative w-full h-full rounded-full overflow-hidden">
+                      <Image
+                        src={profile.avatarUrl}
+                        alt="Dev Avatar"
+                        fill
+                        priority
+                        className="object-cover"
+                      />
+                    </div>
+                  ) : (
+                    <TechAvatar size="sm" />
+                  )}
                 </div>
+                <h3 className="mt-3 font-bold text-base text-slate-100 tracking-tight flex items-center gap-1 font-mono">
+                  {profile.name || "dev_name"}
+                </h3>
+                <p className="mt-1.5 text-[11px] text-slate-400 max-w-[220px] leading-relaxed break-all font-mono">
+                  {profile.bio || "no bio info loaded."}
+                </p>
+              </div>
 
-                {/* 제목 */}
-                <div className="flex-1 text-left pr-2">
-                  <CardTitle className="text-sm font-semibold text-foreground/90 leading-snug group-hover:text-pink-600 dark:group-hover:text-pink-400 transition-colors duration-200">
-                    {link.title}
-                  </CardTitle>
-                </div>
+              {/* 활성화된 모바일 링크 목록 (사이버 글래스 카드화) */}
+              <div className="flex-1 w-full flex flex-col gap-3">
+                {activeLinks.length === 0 ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-slate-900/40 border border-cyan-500/10 rounded-xl">
+                    <Atom className="w-6 h-6 text-cyan-400 animate-spin mb-2" />
+                    <p className="text-[10px] text-slate-400 font-mono">
+                      NO_ACTIVE_BLOCK_LOADED<br />시스템 링크를 활성화하세요.
+                    </p>
+                  </div>
+                ) : (
+                  activeLinks.map((link) => (
+                    <a
+                      key={link.id}
+                      href={link.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-xl transition-all duration-200"
+                    >
+                      {/* 입체적 네온 글로우 테크 글래스 카드 (Wow Factor 2) */}
+                      <Card className="flex flex-row items-center p-3 gap-3 w-full cursor-pointer transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_0_12px_rgba(6,182,212,0.2)] border border-cyan-500/10 hover:border-cyan-400/40 bg-slate-900/50 backdrop-blur-md shadow-lg">
+                        
+                        {/* 아이콘 */}
+                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-950 border border-cyan-500/20 text-cyan-400 transition-all duration-300 group-hover:scale-105 group-hover:rotate-6">
+                          {getIcon(link.icon)}
+                        </div>
 
-                {/* 외부 링크 아이콘 */}
-                <div className="text-muted-foreground/30 group-hover:text-pink-500 group-hover:translate-x-0.5 transition-all duration-300">
-                  <ExternalLink className="h-4 w-4" />
-                </div>
-              </Card>
-            </a>
-          ))}
-        </div>
-      </main>
+                        {/* 제목 */}
+                        <div className="flex-1 text-left pr-1 truncate">
+                          <CardTitle className="text-xs font-semibold text-slate-200 leading-tight group-hover:text-cyan-400 transition-colors font-mono">
+                            {link.title || "untitled_block"}
+                          </CardTitle>
+                        </div>
 
-      {/* 푸터 영역 */}
-      <footer className="w-full max-w-md mx-auto text-center mt-auto pt-6 border-t border-border/20">
-        <p className="text-xs text-muted-foreground">
-          © {new Date().getFullYear()} My Link. All rights reserved.
-        </p>
-        <p className="text-[10px] text-muted-foreground/60 mt-1 font-mono">
-          (Press <kbd className="px-1.5 py-0.5 rounded border border-border/40 bg-muted text-[9px] font-sans">d</kbd> to toggle dark mode)
-        </p>
-      </footer>
+                        {/* 아이콘 화살표 */}
+                        <div className="text-cyan-500/40 group-hover:text-cyan-400 transition-colors">
+                          <ExternalLink className="h-3 w-3" />
+                        </div>
+                      </Card>
+                    </a>
+                  ))
+                )}
+              </div>
 
+              {/* 프리뷰 모바일 하단 로고 */}
+              <div className="mt-8 text-center text-[9px] text-cyan-500/20 font-mono tracking-widest">
+                SYSTEM DEV_LINK ⚡
+              </div>
+
+            </div>
+          </div>
+        </aside>
+
+      </div>
     </div>
   )
 }

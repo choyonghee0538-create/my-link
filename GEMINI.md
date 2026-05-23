@@ -74,4 +74,4 @@ C:\Users\USER\OneDrive\바탕 화면\my_link\
 - [ ] 사용자 인증 (Auth)
 - [ ] 프로필 관리 (Profile)
 - [ ] 링크 블록 관리 (Link Builder)
-- [ ] 퍼블릭 랜딩 페이지 (Public Page)
+- [x] 퍼블릭 랜딩 페이지 (Public Page)
