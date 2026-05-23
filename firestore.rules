@@ -32,8 +32,13 @@ service cloud.firestore {
         // 읽기: 누구나 가능 (비로그인 방문자도 사용자 링크트리 바로가기를 볼 수 있어야 하므로)
         allow read: if true;
         
-        // 쓰기(생성, 수정, 삭제): 로그인 필수이며 본인의 링크 리스트만 제어 가능
-        allow write: if request.auth != null && request.auth.uid == userId;
+        // 생성 및 삭제는 본인 소유자만 가능
+        allow create, delete: if request.auth != null && request.auth.uid == userId;
+        
+        // 수정(update): 본인 소유자이거나, 비로그인 방문자가 오직 clickCount 필드만 정확히 1만큼 증가시키는 경우 허용
+        allow update: if (request.auth != null && request.auth.uid == userId) ||
+                        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clickCount']) &&
+                         request.resource.data.clickCount == resource.data.get('clickCount', 0) + 1);
       }
     }
   }

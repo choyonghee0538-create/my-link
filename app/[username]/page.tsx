@@ -32,6 +32,8 @@ import {
   collectionGroup,
   where,
   setDoc,
+  updateDoc,
+  increment,
 } from "firebase/firestore"
 
 // 링크 아이템 타입 정의
@@ -42,6 +44,7 @@ interface FirestoreLinkItem {
   icon: string
   isActive: boolean
   createdAt?: any
+  clickCount?: number
 }
 
 // 커스텀 Instagram 아이콘 컴포넌트
@@ -124,6 +127,7 @@ export default function UsernamePage({ params }: PageProps) {
   const [mounted, setMounted] = useState(false)
   const [loading, setLoading] = useState(true)
   const [is404, setIs404] = useState(false)
+  const [resolvedUserId, setResolvedUserId] = useState("")
 
   const [profile, setProfile] = useState({
     username: "",
@@ -190,6 +194,8 @@ export default function UsernamePage({ params }: PageProps) {
           return
         }
 
+        setResolvedUserId(userId)
+
         // 2. 해당 uid의 프로필 정보 조회
         const profileRef = doc(db, "users", userId, "profile", "info")
         const profileSnap = await getDoc(profileRef)
@@ -232,6 +238,7 @@ export default function UsernamePage({ params }: PageProps) {
               url: data.url || "",
               icon: data.icon || "sparkles",
               isActive: true,
+              clickCount: data.clickCount || 0,
             })
           }
         })
@@ -247,6 +254,21 @@ export default function UsernamePage({ params }: PageProps) {
 
     loadData()
   }, [username])
+
+  // 링크 클릭 수(clickCount) 실시간 안전 증강 핸들러
+  const handleLinkClick = async (linkId: string) => {
+    if (!resolvedUserId) return
+
+    try {
+      const linkRef = doc(db, "users", resolvedUserId, "links", linkId)
+      await updateDoc(linkRef, {
+        clickCount: increment(1)
+      })
+      console.log(`[Click Tracker] Guest click on ${linkId} tracking resolved and clickCount incremented.`)
+    } catch (err) {
+      console.error("클릭 카운트 저장 중 오류가 발생했습니다:", err)
+    }
+  }
 
   // 테크 네온 터미널 아바타 컴포넌트
   const TechAvatar = ({ avatarUrl }: { avatarUrl?: string }) => {
@@ -377,6 +399,7 @@ export default function UsernamePage({ params }: PageProps) {
                 href={link.url}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => handleLinkClick(link.id)}
                 className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-2xl transition-all duration-200"
               >
                 {/* 네온 글로우 테크 카드 */}
@@ -387,10 +410,13 @@ export default function UsernamePage({ params }: PageProps) {
                   </div>
                   
                   {/* 제목 */}
-                  <div className="flex-1 text-left pr-1 truncate">
+                  <div className="flex-1 text-left pr-1 truncate flex flex-col justify-center">
                     <CardTitle className="text-sm font-semibold text-slate-200 leading-tight group-hover:text-cyan-400 transition-colors font-mono">
                       {link.title || "untitled_block"}
                     </CardTitle>
+                    <span className="text-[10px] text-cyan-500/70 font-mono mt-1">
+                      클릭수: {link.clickCount || 0}
+                    </span>
                   </div>
                   
                   {/* 외부 링크 화살표 아이콘 */}

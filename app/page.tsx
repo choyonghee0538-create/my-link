@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useRef, Suspense } from "react"
 import Image from "next/image"
+import NextLink from "next/link"
 import { useTheme } from "next-themes"
 import { dummyLinks, LinkItem } from "@/data/links"
 import { Card, CardTitle } from "@/components/ui/card"
@@ -45,6 +46,7 @@ import {
   AlertTriangle,
   Lock,
   ArrowRight,
+  BarChart3,
 } from "lucide-react"
 
 // Firebase 클라이언트 모듈 연동
@@ -68,11 +70,13 @@ import {
   orderBy,
   writeBatch,
   serverTimestamp,
+  increment,
 } from "firebase/firestore"
 
 // Firestore 특화 데이터 모델 정의
 interface FirestoreLinkItem extends LinkItem {
   createdAt?: any
+  clickCount?: number
 }
 
 // 커스텀 Instagram 아이콘 컴포넌트
@@ -323,6 +327,7 @@ function MyLinkApp() {
             icon: data.icon || "sparkles",
             isActive: data.isActive !== undefined ? data.isActive : true,
             createdAt: data.createdAt,
+            clickCount: data.clickCount || 0,
           })
         })
         setLinks(loadedLinks)
@@ -423,6 +428,7 @@ function MyLinkApp() {
         icon: newIcon,
         isActive: true,
         createdAt: serverTimestamp(),
+        clickCount: 0,
       })
 
       setNewTitle("")
@@ -657,6 +663,24 @@ function MyLinkApp() {
     }
   }
 
+  // 링크 클릭 수(clickCount) 실시간 안전 증강 핸들러
+  const handleLinkClick = async (linkId: string) => {
+    // 로그인 확인
+    if (!auth.currentUser) {
+      console.warn("[Click Tracker] Notice: User is not logged in (anonymous preview click).")
+    }
+
+    try {
+      const linkRef = doc(db, "users", targetUid || (auth.currentUser ? auth.currentUser.uid : "unknown"), "links", linkId)
+      await updateDoc(linkRef, {
+        clickCount: increment(1)
+      })
+      console.log(`[Click Tracker] Link block ${linkId} clicked and clickCount incremented.`)
+    } catch (err) {
+      console.error("클릭 카운트 저장 중 오류가 발생했습니다:", err)
+    }
+  }
+
   // 활성화된 링크만 필터링
   const activeLinks = links.filter((link) => link.isActive)
 
@@ -783,8 +807,20 @@ function MyLinkApp() {
                     </div>
                   </div>
 
-                  {/* 통합 숏컷 액션 (테마 변경 및 로그아웃) */}
+                  {/* 통합 숏컷 액션 (통계 대시보드, 테마 변경 및 로그아웃) */}
                   <div className="flex flex-col gap-2 pt-3">
+                    {/* 통계 대시보드 */}
+                    <NextLink
+                      href="/stats"
+                      className="cursor-pointer w-full flex items-center justify-between p-2 rounded-xl bg-cyan-950/30 border border-cyan-500/10 hover:border-cyan-400/50 transition-all text-cyan-400 group shadow-[0_0_10px_rgba(6,182,212,0.05)]"
+                    >
+                      <span className="text-[10px] font-mono font-bold flex items-center gap-2">
+                        <BarChart3 className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition-transform" />
+                        STATISTICS_DASHBOARD
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+                    </NextLink>
+
                     {/* 테마 슬라이드 토글 */}
                     <button
                       onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
@@ -907,6 +943,7 @@ function MyLinkApp() {
                       href={link.url}
                       target="_blank"
                       rel="noopener noreferrer"
+                      onClick={() => handleLinkClick(link.id)}
                       className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-xl transition-all duration-200"
                     >
                       {/* 네온 글로우 테크 카드 */}
@@ -916,10 +953,13 @@ function MyLinkApp() {
                           {getIcon(link.icon)}
                         </div>
                         {/* 제목 */}
-                        <div className="flex-1 text-left pr-1 truncate">
+                        <div className="flex-1 text-left pr-1 truncate flex flex-col justify-center">
                           <CardTitle className="text-xs font-semibold text-slate-200 leading-tight group-hover:text-cyan-400 transition-colors font-mono">
                             {link.title || "untitled_block"}
                           </CardTitle>
+                          <span className="text-[9px] text-cyan-500/60 font-mono mt-0.5">
+                            클릭수: {link.clickCount || 0}
+                          </span>
                         </div>
                         {/* 아이콘 화살표 */}
                         <div className="text-cyan-500/40 group-hover:text-cyan-400 transition-colors">
@@ -1244,15 +1284,20 @@ function MyLinkApp() {
                                 <h4 className="text-sm font-bold text-slate-200 font-mono transition-colors group-hover:text-cyan-400 leading-tight">
                                   {link.title}
                                 </h4>
-                                <a
-                                  href={link.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-xs text-cyan-400/80 hover:text-cyan-300 font-mono hover:underline inline-flex items-center gap-1.5 max-w-full truncate"
-                                >
-                                  <span className="truncate">{link.url}</span>
-                                  <ExternalLink className="w-3 h-3 flex-shrink-0" />
-                                </a>
+                                <div className="flex items-center gap-2">
+                                  <a
+                                    href={link.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-cyan-400/80 hover:text-cyan-300 font-mono hover:underline inline-flex items-center gap-1.5 max-w-[200px] sm:max-w-xs truncate"
+                                  >
+                                    <span className="truncate">{link.url}</span>
+                                    <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                                  </a>
+                                  <span className="text-[10px] bg-slate-800/60 border border-slate-700/50 text-slate-400 px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
+                                    클릭수: {link.clickCount || 0}
+                                  </span>
+                                </div>
                               </div>
                             )}
                           </div>
@@ -1383,6 +1428,7 @@ function MyLinkApp() {
                         href={link.url}
                         target="_blank"
                         rel="noopener noreferrer"
+                        onClick={() => handleLinkClick(link.id)}
                         className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-xl transition-all duration-200"
                       >
                         {/* 네온 글로우 테크 카드 */}
@@ -1394,10 +1440,13 @@ function MyLinkApp() {
                           </div>
 
                           {/* 제목 */}
-                          <div className="flex-1 text-left pr-1 truncate">
+                          <div className="flex-1 text-left pr-1 truncate flex flex-col justify-center">
                             <CardTitle className="text-xs font-semibold text-slate-200 leading-tight group-hover:text-cyan-400 transition-colors font-mono">
                               {link.title || "untitled_block"}
                             </CardTitle>
+                            <span className="text-[9px] text-cyan-500/60 font-mono mt-0.5">
+                              클릭수: {link.clickCount || 0}
+                            </span>
                           </div>
 
                           {/* 아이콘 화살표 */}
