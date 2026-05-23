@@ -41,15 +41,25 @@ import {
   Atom,
   Check,
   X,
-  AlertTriangle, // 추가됨
+  AlertTriangle,
+  Lock,
+  ArrowRight,
 } from "lucide-react"
 
-// Firebase Firestore 관련 기능 임포트
-import { db } from "@/lib/firebase"
+// Firebase 클라이언트 모듈 연동
+import { auth, db } from "@/lib/firebase"
+import {
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  User as FirebaseUser,
+} from "firebase/auth"
 import {
   collection,
   doc,
   setDoc,
+  getDoc,
   updateDoc,
   deleteDoc,
   onSnapshot,
@@ -59,7 +69,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore"
 
-// Firestore 특화 데이터 모델 정의 (타입 안전성 보장)
+// Firestore 특화 데이터 모델 정의
 interface FirestoreLinkItem extends LinkItem {
   createdAt?: any
 }
@@ -132,7 +142,7 @@ const getIcon = (iconName: string, activeColorClass?: string) => {
   }
 }
 
-// 아이콘 데이터 리스트 (다이얼로그에서 선택 시 사용)
+// 아이콘 데이터 리스트
 const AVAILABLE_ICONS = [
   { value: "instagram", label: "인스타그램", color: "text-cyan-400" },
   { value: "youtube", label: "유튜브", color: "text-red-400" },
@@ -147,7 +157,11 @@ export default function Page() {
   const { resolvedTheme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
 
-  // 상태 관리 (State Management)
+  // 사용자 로그인 및 로딩 세션 상태 (Wow Factor 1)
+  const [user, setUser] = useState<FirebaseUser | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  // 상태 관리 (인수 인증 연동에 맞춰 비로그인 시 dummyLinks 세팅)
   const [links, setLinks] = useState<FirestoreLinkItem[]>([])
   const [profile, setProfile] = useState({
     name: "데브 로그 (DevLog) ⚡",
@@ -169,59 +183,90 @@ export default function Page() {
   const [tempTitle, setTempTitle] = useState("")
   const [tempUrl, setTempUrl] = useState("")
 
-  // 실수 삭제 방지용 커스텀 모달 상태 (Wow Factor 1)
+  // 실수 삭제 방지용 커스텀 모달 상태
   const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null)
 
-  // Hydration mismatch 방지 및 Firestore 실시간 동기화 구독
+  // Hydration mismatch 방지 및 Firebase Auth 관측기 연동
   useEffect(() => {
     setMounted(true)
 
-    // users/anonymous/links 컬렉션을 createdAt 필드 기준으로 내림차순(최신순, desc) 정렬하여 구독
-    const linksRef = collection(db, "users/anonymous/links")
-    const q = query(linksRef, orderBy("createdAt", "desc"))
+    let unsubscribeLinks: (() => void) | null = null
+    let unsubscribeProfile: (() => void) | null = null
 
-    const unsubscribe = onSnapshot(q, async (snapshot) => {
-      // 1. 만약 데이터가 아예 없다면 dummyLinks를 최초 데이터로 자동 시딩
-      if (snapshot.empty) {
-        try {
-          const batch = writeBatch(db)
-          dummyLinks.forEach((link, idx) => {
-            const docRef = doc(db, "users/anonymous/links", link.id)
-            const timeOffset = (dummyLinks.length - idx) * 1000
-            batch.set(docRef, {
-              id: link.id,
-              title: link.title,
-              url: link.url,
-              icon: link.icon,
-              isActive: link.isActive,
-              createdAt: new Date(Date.now() + timeOffset),
+    // 로그인 세션 실시간 감시 (onAuthStateChanged)
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser)
+
+      // 이전에 구독 중이던 리스너가 있다면 안전하게 해제하여 메모리 누수 원천 방지
+      if (unsubscribeLinks) unsubscribeLinks()
+      if (unsubscribeProfile) unsubscribeProfile()
+
+      if (currentUser) {
+        // [로그인 상태]: 개인화 데이터 레이어 활성화 (users/{uid}/links 및 users/{uid}/profile)
+
+        // 1. 개인화 프로필 실시간 구독 및 최초 로그인 유저용 구글 정보 시딩 (Wow Factor 2)
+        const profileRef = doc(db, "users", currentUser.uid, "profile", "info")
+        unsubscribeProfile = onSnapshot(profileRef, async (profileSnapshot) => {
+          if (!profileSnapshot.exists()) {
+            const defaultProfile = {
+              name: currentUser.email || currentUser.displayName || "Tech Pioneer",
+              bio: "오픈소스 기여와 신기술 트렌드에 기여하고 있습니다. 나만의 테크 링크를 즉시 완성해 보세요!",
+              avatarUrl: currentUser.photoURL || "",
+            }
+            try {
+              await setDoc(profileRef, defaultProfile)
+              setProfile(defaultProfile)
+            } catch (err) {
+              console.error("Error seeding default profile: ", err)
+            }
+          } else {
+            const data = profileSnapshot.data()
+            setProfile({
+              name: data.name || "",
+              bio: data.bio || "",
+              avatarUrl: data.avatarUrl || "",
+            })
+          }
+        })
+
+        // 2. 개인화 링크 실시간 구독 및 최초 로그인 시 빈 상태 보존 (시딩 로직 배제)
+        const linksRef = collection(db, "users", currentUser.uid, "links")
+        const q = query(linksRef, orderBy("createdAt", "desc"))
+        unsubscribeLinks = onSnapshot(q, (snapshot) => {
+          const loadedLinks: FirestoreLinkItem[] = []
+          snapshot.forEach((docSnapshot) => {
+            const data = docSnapshot.data()
+            loadedLinks.push({
+              id: docSnapshot.id,
+              title: data.title || "",
+              url: data.url || "",
+              icon: data.icon || "sparkles",
+              isActive: data.isActive !== undefined ? data.isActive : true,
+              createdAt: data.createdAt,
             })
           })
-          await batch.commit()
-        } catch (err) {
-          console.error("Error seeding dummy links to Firestore:", err)
-        }
-      } else {
-        // 2. 데이터가 존재한다면 상태에 매핑 연동
-        const loadedLinks: FirestoreLinkItem[] = []
-        snapshot.forEach((docSnapshot) => {
-          const data = docSnapshot.data()
-          loadedLinks.push({
-            id: docSnapshot.id,
-            title: data.title || "",
-            url: data.url || "",
-            icon: data.icon || "sparkles",
-            isActive: data.isActive !== undefined ? data.isActive : true,
-            createdAt: data.createdAt,
-          })
+          setLinks(loadedLinks)
+        }, (error) => {
+          console.error("Error subscribing to personal links:", error)
         })
-        setLinks(loadedLinks)
+
+      } else {
+        // [비로그인 상태]: 데모 모바일 화면 유지를 위해 dummyLinks 복사 적재
+        setLinks(dummyLinks)
+        setProfile({
+          name: "데브 로그 (DevLog) ⚡",
+          bio: "오픈소스 기여, AI 트렌드, 그리고 프론트엔드 아키텍처에 관심이 많은 테크 크리에이터입니다. 최신 정보는 아래 링크에서 확인하세요!",
+          avatarUrl: ""
+        })
       }
-    }, (error) => {
-      console.error("Error subscribing to Firestore links:", error)
+      setLoading(false)
     })
 
-    return () => unsubscribe()
+    return () => {
+      unsubscribeAuth()
+      if (unsubscribeLinks) unsubscribeLinks()
+      if (unsubscribeProfile) unsubscribeProfile()
+    }
   }, [])
 
   // 키보드로 다크 모드 토글 단축키 활성화 (d)
@@ -235,9 +280,34 @@ export default function Page() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [resolvedTheme, setTheme])
 
-  // 링크 생성 핸들러 (Create)
+  // Google 소셜 로그인 핸들러
+  const handleGoogleLogin = async () => {
+    const provider = new GoogleAuthProvider()
+    try {
+      await signInWithPopup(auth, provider)
+    } catch (err) {
+      console.error("Google Authentication error:", err)
+      alert("구글 로그인 진행 도중 에러가 발생했습니다.")
+    }
+  }
+
+  // 로그아웃 핸들러
+  const handleLogout = async () => {
+    try {
+      await signOut(auth)
+      // 로그아웃 시 대시보드 상태값 리셋
+      setLinks(dummyLinks)
+      setEditingLinkId(null)
+      setDeletingLinkId(null)
+    } catch (err) {
+      console.error("Firebase SignOut error:", err)
+    }
+  }
+
+  // 링크 생성 핸들러 (개인화 동적 경로 이식)
   const handleCreateLink = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!user) return
 
     if (!newTitle.trim()) {
       alert("링크 제목을 입력해주세요.")
@@ -256,7 +326,7 @@ export default function Page() {
     const newId = Date.now().toString()
 
     try {
-      await setDoc(doc(db, "users/anonymous/links", newId), {
+      await setDoc(doc(db, "users", user.uid, "links", newId), {
         id: newId,
         title: newTitle.trim(),
         url: correctedUrl,
@@ -265,62 +335,63 @@ export default function Page() {
         createdAt: serverTimestamp(),
       })
 
-      // 폼 초기화 및 다이얼로그 닫기
       setNewTitle("")
       setNewUrl("")
       setNewIcon("sparkles")
       setIsAddDialogOpen(false)
     } catch (err) {
-      console.error("Error creating link in Firestore:", err)
+      console.error("Error creating personal link:", err)
       alert("링크를 데이터베이스에 추가하지 못했습니다.")
     }
   }
 
   // 링크 활성화 ON/OFF 토글 핸들러
   const handleToggleLink = async (id: string, currentActive: boolean) => {
+    if (!user) return
     try {
-      await updateDoc(doc(db, "users/anonymous/links", id), {
+      await updateDoc(doc(db, "users", user.uid, "links", id), {
         isActive: !currentActive,
       })
     } catch (err) {
-      console.error("Error updating link active state in Firestore:", err)
+      console.error("Error updating active toggle:", err)
     }
   }
 
-  // 링크 삭제 요청 핸들러 (Delete Request -> 모달 오픈으로 안전장치 가동)
+  // 링크 삭제 요청 핸들러 (모달 오픈)
   const handleDeleteLink = (id: string) => {
     setDeletingLinkId(id)
   }
 
-  // 링크 삭제 확정 및 집행 핸들러 (Confirm Delete -> Firestore deleteDoc 연동)
+  // 링크 삭제 확정 및 집행
   const handleConfirmDelete = async () => {
-    if (!deletingLinkId) return
+    if (!user || !deletingLinkId) return
 
     try {
-      await deleteDoc(doc(db, "users/anonymous/links", deletingLinkId))
-      setDeletingLinkId(null) // 삭제 완료 후 모달 닫기
+      await deleteDoc(doc(db, "users", user.uid, "links", deletingLinkId))
+      setDeletingLinkId(null)
     } catch (err) {
-      console.error("Error deleting link in Firestore:", err)
+      console.error("Error deleting link in personal firestore path:", err)
       alert("삭제 처리 중 문제가 발생했습니다.")
     }
   }
 
-  // 인라인 편집 수정 시작 (Start Edit)
+  // 인라인 편집 수정 시작
   const handleStartEdit = (link: FirestoreLinkItem) => {
     setEditingLinkId(link.id)
     setTempTitle(link.title)
     setTempUrl(link.url)
   }
 
-  // 인라인 편집 취소 (Cancel)
+  // 인라인 편집 취소
   const handleCancelEdit = () => {
     setEditingLinkId(null)
     setTempTitle("")
     setTempUrl("")
   }
 
-  // 인라인 편집 저장 (Save)
+  // 인라인 편집 저장
   const handleSaveEdit = async (id: string) => {
+    if (!user) return
     if (!tempTitle.trim()) {
       alert("링크 제목을 입력해주세요.")
       return
@@ -336,7 +407,7 @@ export default function Page() {
     }
 
     try {
-      await updateDoc(doc(db, "users/anonymous/links", id), {
+      await updateDoc(doc(db, "users", user.uid, "links", id), {
         title: tempTitle.trim(),
         url: correctedUrl,
       })
@@ -345,14 +416,35 @@ export default function Page() {
       setTempTitle("")
       setTempUrl("")
     } catch (err) {
-      console.error("Error saving inline edit to Firestore:", err)
+      console.error("Error saving inline edit:", err)
       alert("수정 내역을 저장하는 중 오류가 발생했습니다.")
+    }
+  }
+
+  // 프로필 인라인 편집 변경 (Local UI State 선반영 - 타자 반응성 보존)
+  const handleLocalUpdateProfile = (field: "name" | "bio", value: string) => {
+    setProfile({
+      ...profile,
+      [field]: value
+    })
+  }
+
+  // 프로필 포커스 아웃 (onBlur) 시점에 Firestore 영구 갱신 (Wow Factor 3)
+  const handleSaveProfileToFirestore = async (field: "name" | "bio", value: string) => {
+    if (!user) return
+    try {
+      const profileRef = doc(db, "users", user.uid, "profile", "info")
+      await updateDoc(profileRef, {
+        [field]: value.trim()
+      })
+    } catch (err) {
+      console.error(`Error saving profile ${field} to Firestore: `, err)
     }
   }
 
   // 링크 순서 위로 이동 (Up)
   const handleMoveUp = async (index: number) => {
-    if (index === 0) return
+    if (!user || index === 0) return
     try {
       const batch = writeBatch(db)
       const currentLink = links[index]
@@ -360,21 +452,21 @@ export default function Page() {
 
       if (!currentLink.createdAt || !targetLink.createdAt) return
 
-      const currentRef = doc(db, "users/anonymous/links", currentLink.id)
-      const targetRef = doc(db, "users/anonymous/links", targetLink.id)
+      const currentRef = doc(db, "users", user.uid, "links", currentLink.id)
+      const targetRef = doc(db, "users", user.uid, "links", targetLink.id)
 
       batch.update(currentRef, { createdAt: targetLink.createdAt })
       batch.update(targetRef, { createdAt: currentLink.createdAt })
 
       await batch.commit()
     } catch (err) {
-      console.error("Error moving link up in Firestore:", err)
+      console.error("Error moving link up:", err)
     }
   }
 
   // 링크 순서 아래로 이동 (Down)
   const handleMoveDown = async (index: number) => {
-    if (index === links.length - 1) return
+    if (!user || index === links.length - 1) return
     try {
       const batch = writeBatch(db)
       const currentLink = links[index]
@@ -382,28 +474,40 @@ export default function Page() {
 
       if (!currentLink.createdAt || !targetLink.createdAt) return
 
-      const currentRef = doc(db, "users/anonymous/links", currentLink.id)
-      const targetRef = doc(db, "users/anonymous/links", targetLink.id)
+      const currentRef = doc(db, "users", user.uid, "links", currentLink.id)
+      const targetRef = doc(db, "users", user.uid, "links", targetLink.id)
 
       batch.update(currentRef, { createdAt: targetLink.createdAt })
       batch.update(targetRef, { createdAt: currentLink.createdAt })
 
       await batch.commit()
     } catch (err) {
-      console.error("Error moving link down in Firestore:", err)
+      console.error("Error moving link down:", err)
     }
   }
 
-  // 활성화된 링크만 필터링 (우측 프리뷰 렌더링용)
+  // 활성화된 링크만 필터링
   const activeLinks = links.filter((link) => link.isActive)
 
   // 테크 네온 터미널 아바타 컴포넌트
-  const TechAvatar = ({ size = "lg" }: { size?: "sm" | "lg" }) => {
+  const TechAvatar = ({ size = "lg", avatarUrl }: { size?: "sm" | "lg"; avatarUrl?: string }) => {
     const isLg = size === "lg"
+    
+    // 만약 전달받은 고해상도 아바타 URL이 있다면 직접 이미지 렌더링
+    if (avatarUrl) {
+      return (
+        <div className={`relative ${
+          isLg ? "w-18 h-18 sm:w-20 sm:h-20" : "w-14 h-14 sm:w-16 sm:h-16"
+        } rounded-full border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.35)] overflow-hidden flex items-center justify-center bg-slate-950`}>
+          <Image src={avatarUrl} alt="Branded Avatar" fill className="object-cover" />
+        </div>
+      )
+    }
+
     return (
       <div className={`relative ${
         isLg ? "w-18 h-18 sm:w-20 sm:h-20" : "w-14 h-14 sm:w-16 sm:h-16"
-      } rounded-full bg-slate-950 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.35)] flex items-center justify-center overflow-hidden group/avatar`}>
+      } rounded-full bg-slate-955 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.35)] flex items-center justify-center overflow-hidden group/avatar`}>
         <div className="absolute inset-0 bg-gradient-to-tr from-cyan-500/20 via-transparent to-indigo-500/20 opacity-80 group-hover/avatar:rotate-180 transition-transform duration-1000" />
         <Terminal className={`${
           isLg ? "w-7 h-7 sm:w-8 h-8" : "w-5 h-5 sm:w-6 h-6"
@@ -423,7 +527,7 @@ export default function Page() {
       {/* 테크 배경 미세 그리드 패턴 장식 */}
       <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.015)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.015)_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none z-0" />
       
-      {/* 글로벌 상단 헤더 바 */}
+      {/* 글로벌 상단 헤더 바 (Google 소셜 로그인 버튼 탑재) */}
       <header className="sticky top-0 z-40 w-full border-b border-cyan-500/10 bg-slate-950/80 backdrop-blur-md px-6 py-4 flex items-center justify-between shadow-lg shadow-cyan-950/10">
         <div className="flex items-center gap-2.5">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-cyan-500/20 text-white font-mono font-bold text-lg border border-cyan-400/20">
@@ -433,7 +537,7 @@ export default function Page() {
             <h1 className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-2 font-mono">
               My Link <span className="text-[10px] font-sans bg-cyan-950/60 border border-cyan-500/30 text-cyan-400 font-semibold px-2 py-0.5 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.2)]">Dev Dashboard</span>
             </h1>
-            <p className="text-[11px] text-slate-400 hidden sm:block">파이어베이스 Cloud DB(Firestore) 실수방지용 커스텀 확인 모달 장착</p>
+            <p className="text-[11px] text-slate-400 hidden sm:block">구글 소셜 로그인을 통해 나만의 링크 빌더를 가동해 보세요</p>
           </div>
         </div>
 
@@ -441,7 +545,7 @@ export default function Page() {
           {/* 테마 토글 버튼 */}
           <button
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-900/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-900/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer mr-1"
             aria-label="Toggle Theme"
           >
             {resolvedTheme === "dark" ? (
@@ -450,6 +554,35 @@ export default function Page() {
               <Moon className="h-4.5 w-4.5 text-indigo-400" />
             )}
           </button>
+
+          {/* 구글 소셜 로그인 / 로그아웃 & 프로필 뱃지 인터페이스 (Wow Factor 4) */}
+          {user ? (
+            <div className="flex items-center gap-2 border-l border-cyan-500/20 pl-3">
+              <div className="relative w-7 h-7 rounded-full overflow-hidden border border-cyan-500/30 hidden sm:block">
+                {user.photoURL ? (
+                  <Image src={user.photoURL} alt="User Photo" fill className="object-cover" />
+                ) : (
+                  <User className="w-full h-full text-cyan-400 p-1 bg-slate-950" />
+                )}
+              </div>
+              <span className="text-xs text-slate-300 font-semibold font-mono max-w-[80px] truncate hidden sm:inline" title={user.displayName || "User"}>
+                {user.displayName || "User"}
+              </span>
+              <Button
+                onClick={handleLogout}
+                className="cursor-pointer bg-slate-950 border border-red-500/35 hover:border-red-400 text-red-400 text-[10px] font-mono font-bold h-8 px-2.5 rounded-lg active:scale-95 hover:bg-red-950/15 transition-all"
+              >
+                LOGOUT
+              </Button>
+            </div>
+          ) : (
+            <Button
+              onClick={handleGoogleLogin}
+              className="cursor-pointer bg-slate-950 border border-cyan-500/30 hover:border-cyan-400 text-cyan-400 text-[10px] font-mono font-bold h-8 px-3 rounded-lg shadow-[0_0_8px_rgba(6,182,212,0.15)] hover:shadow-[0_0_12px_rgba(6,182,212,0.3)] active:scale-95 transition-all"
+            >
+              GOOGLE SIGN IN
+            </Button>
+          )}
         </div>
       </header>
 
@@ -457,7 +590,8 @@ export default function Page() {
       <div className="flex md:hidden sticky top-[73px] z-30 border-b border-cyan-500/10 bg-slate-950/90 backdrop-blur-md px-4 py-2 gap-2">
         <button
           onClick={() => setActiveTab("edit")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-semibold rounded-lg transition-all duration-300 font-mono ${
+          disabled={!user}
+          className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-semibold rounded-lg transition-all duration-300 font-mono disabled:opacity-40 disabled:pointer-events-none ${
             activeTab === "edit"
               ? "bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/20 font-bold"
               : "text-slate-400 hover:bg-slate-900/50"
@@ -477,323 +611,357 @@ export default function Page() {
         </button>
       </div>
 
-      {/* 대시보드 바디 */}
+      {/* 대시보드 바디 (로그인 여부에 따라 좌측 패널 분기 렌더링) */}
       <div className="flex-1 w-full max-w-7xl mx-auto flex flex-col md:flex-row h-[calc(100vh-73px)] md:h-[calc(100vh-73px)] overflow-hidden z-10">
         
-        {/* 1. 좌측 편집 패널 */}
-        <main className={`flex-1 h-full overflow-y-auto p-6 lg:p-8 flex flex-col gap-8 ${
-          activeTab === "edit" ? "block" : "hidden md:block"
-        }`}>
-          
-          {/* A. 프로필 설정 카드 */}
-          <section className="bg-slate-900/40 backdrop-blur-md border border-cyan-500/10 rounded-2xl p-6 shadow-xl flex flex-col gap-4">
-            <div className="flex items-center gap-2 border-b border-cyan-500/10 pb-3">
-              <Settings2 className="w-5 h-5 text-cyan-400" />
-              <h2 className="text-base font-bold text-slate-200 font-mono">system_branding_config</h2>
-            </div>
+        {/* 1. 좌측 편집 패널 (로딩 / 비로그인 안내 / 로그인 편집 UI 3단계 구성) */}
+        {loading ? (
+          /* [A. 초기 로딩 화면] */
+          <main className="flex-1 h-full flex flex-col items-center justify-center p-6 gap-3">
+            <Cpu className="w-10 h-10 text-cyan-400 animate-spin" />
+            <p className="text-xs text-slate-500 font-mono animate-pulse">authorizing_system_session...</p>
+          </main>
+        ) : !user ? (
+          /* [B. 비로그인 대시보드 안내 화면] (Wow Factor 5) */
+          <main className="flex-1 h-full flex flex-col items-center justify-center p-8 lg:p-12 text-center bg-slate-950/20">
+            <div className="max-w-md flex flex-col items-center gap-6 bg-slate-900/35 border border-cyan-500/10 p-8 rounded-3xl backdrop-blur-md shadow-2xl relative overflow-hidden ring-1 ring-cyan-500/10">
+              
+              {/* 장식용 네온 모듈 */}
+              <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-cyan-500/10 to-indigo-500/10 rounded-bl-full pointer-events-none" />
 
-            <div className="flex flex-col sm:flex-row gap-5 items-start sm:items-center">
-              {/* 원형 아바타 */}
-              <div className="flex justify-center w-full sm:w-auto">
-                {profile.avatarUrl ? (
-                  <div className="relative w-16 h-16 rounded-full overflow-hidden border border-cyan-500 shadow-md">
-                    <Image
-                      src={profile.avatarUrl}
-                      alt="Profile Avatar"
-                      fill
-                      className="object-cover"
+              <div className="w-16 h-16 rounded-2xl bg-slate-950 border border-cyan-500/30 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.2)]">
+                <Lock className="w-8 h-8 text-cyan-400 animate-pulse" />
+              </div>
+
+              <div className="space-y-3">
+                <h2 className="text-xl font-bold text-slate-200 font-mono tracking-tight">
+                  build_system: access_denied
+                </h2>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  로그인 이후에 나만의 테크니컬 마이링크를 빌드하고 실시간으로 관리할 수 있습니다. 구글 간편 연동을 통해 나만의 소셜 채널을 세상에 배포해 보세요!
+                </p>
+                <div className="text-[10px] text-cyan-500/40 font-mono">
+                  - 3초만에 구글 계정으로 안전하게 로그인 가능<br />
+                  - 로그인 즉시 나만의 전용 UID 클라우드 공간 제공
+                </div>
+              </div>
+
+              <Button
+                onClick={handleGoogleLogin}
+                className="w-full cursor-pointer bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold font-mono py-6 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 active:scale-98 transition-all group"
+              >
+                GOOGLE 소셜 로그인으로 시작하기
+                <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+              </Button>
+            </div>
+          </main>
+        ) : (
+          /* [C. 로그인 상태: 실제 개인화된 에디터 대시보드] */
+          <main className={`flex-1 h-full overflow-y-auto p-6 lg:p-8 flex flex-col gap-8 ${
+            activeTab === "edit" ? "block" : "hidden md:block"
+          }`}>
+            
+            {/* A. 프로필 설정 카드 */}
+            <section className="bg-slate-900/40 backdrop-blur-md border border-cyan-500/10 rounded-2xl p-6 shadow-xl flex flex-col gap-4">
+              <div className="flex items-center gap-2 border-b border-cyan-500/10 pb-3">
+                <Settings2 className="w-5 h-5 text-cyan-400" />
+                <h2 className="text-base font-bold text-slate-200 font-mono">system_branding_config</h2>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-5 items-start sm:items-center">
+                {/* 원형 아바타 (개인화된 구글 이미지 또는 템플릿 아바타 연동) */}
+                <div className="flex justify-center w-full sm:w-auto">
+                  <TechAvatar size="sm" avatarUrl={profile.avatarUrl} />
+                </div>
+
+                {/* 닉네임, 소개글 입력 */}
+                <div className="flex-1 w-full grid gap-4">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="profile-name" className="text-xs text-cyan-400 font-semibold font-mono">
+                      PROMPT_NAME (이메일 - 최대 50자)
+                    </Label>
+                    <Input
+                      id="profile-name"
+                      value={profile.name}
+                      onChange={(e) => handleLocalUpdateProfile("name", e.target.value.slice(0, 50))}
+                      onBlur={(e) => handleSaveProfileToFirestore("name", e.target.value)}
+                      placeholder="이메일을 입력하세요"
+                      className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 font-mono text-sm placeholder:text-slate-600"
                     />
                   </div>
-                ) : (
-                  <TechAvatar size="sm" />
-                )}
-              </div>
 
-              {/* 닉네임, 소개글 입력 */}
-              <div className="flex-1 w-full grid gap-4">
-                <div className="grid gap-1.5">
-                  <Label htmlFor="profile-name" className="text-xs text-cyan-400 font-semibold font-mono">
-                    PROMPT_NAME (닉네임 - 최대 30자)
-                  </Label>
-                  <Input
-                    id="profile-name"
-                    value={profile.name}
-                    onChange={(e) => setProfile({ ...profile, name: e.target.value.slice(0, 30) })}
-                    placeholder="프로필명을 입력하세요"
-                    className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 font-mono text-sm placeholder:text-slate-600"
-                  />
-                </div>
-
-                <div className="grid gap-1.5">
-                  <Label htmlFor="profile-bio" className="text-xs text-cyan-400 font-semibold font-mono">
-                    BIO_DESCRIPTION (한 줄 소개 - 최대 80자)
-                  </Label>
-                  <Input
-                    id="profile-bio"
-                    value={profile.bio}
-                    onChange={(e) => setProfile({ ...profile, bio: e.target.value.slice(0, 80) })}
-                    placeholder="소개글을 입력하세요"
-                    className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
-                  />
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="profile-bio" className="text-xs text-cyan-400 font-semibold font-mono">
+                      BIO_DESCRIPTION (한 줄 소개 - 최대 80자)
+                    </Label>
+                    <Input
+                      id="profile-bio"
+                      value={profile.bio}
+                      onChange={(e) => handleLocalUpdateProfile("bio", e.target.value.slice(0, 80))}
+                      onBlur={(e) => handleSaveProfileToFirestore("bio", e.target.value)}
+                      placeholder="소개글을 입력하세요"
+                      className="bg-slate-955/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          {/* B. 링크 블록 관리 패널 */}
-          <section className="flex-1 flex flex-col gap-4 min-h-[300px]">
-            <div className="flex items-center justify-between border-b border-cyan-500/10 pb-3">
-              <div className="flex items-center gap-2">
-                <Link className="w-5 h-5 text-cyan-400" />
-                <h2 className="text-base font-bold text-slate-200 font-mono">link_block_builder (Cloud DB)</h2>
-              </div>
+            {/* B. 링크 블록 관리 패널 */}
+            <section className="flex-1 flex flex-col gap-4 min-h-[300px]">
+              <div className="flex items-center justify-between border-b border-cyan-500/10 pb-3">
+                <div className="flex items-center gap-2">
+                  <Link className="w-5 h-5 text-cyan-400" />
+                  <h2 className="text-base font-bold text-slate-200 font-mono">link_block_builder (Cloud DB)</h2>
+                </div>
 
-              {/* 링크 추가 다이얼로그 (Dialog) */}
-              <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
-                <DialogTrigger render={
-                  <Button className="cursor-pointer bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold font-mono gap-1.5 px-4 py-2 h-9 rounded-xl shadow-md shadow-cyan-500/10 active:scale-95 transition-all duration-200 border-none" />
-                }>
-                  <Plus className="w-4.5 h-4.5" /> ADD_NEW_BLOCK
-                </DialogTrigger>
-                
-                <DialogContent className="border border-cyan-500/20 bg-slate-955/95 backdrop-blur-xl shadow-[0_0_35px_rgba(6,182,212,0.2)] rounded-2xl max-w-sm">
-                  <DialogHeader>
-                    <DialogTitle className="text-lg font-bold text-slate-100 flex items-center gap-2 font-mono border-b border-cyan-500/10 pb-2">
-                      <Terminal className="w-5 h-5 text-cyan-400" /> create_link_block
-                    </DialogTitle>
-                  </DialogHeader>
+                {/* 링크 추가 다이얼로그 */}
+                <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+                  <DialogTrigger render={
+                    <Button className="cursor-pointer bg-cyan-500 hover:bg-cyan-600 text-slate-955 font-bold font-mono gap-1.5 px-4 py-2 h-9 rounded-xl shadow-md shadow-cyan-500/10 active:scale-95 transition-all duration-200 border-none" />
+                  }>
+                    <Plus className="w-4.5 h-4.5" /> ADD_NEW_BLOCK
+                  </DialogTrigger>
+                  
+                  <DialogContent className="border border-cyan-500/20 bg-slate-955/95 backdrop-blur-xl shadow-[0_0_35px_rgba(6,182,212,0.2)] rounded-2xl max-w-sm">
+                    <DialogHeader>
+                      <DialogTitle className="text-lg font-bold text-slate-100 flex items-center gap-2 font-mono border-b border-cyan-500/10 pb-2">
+                        <Terminal className="w-5 h-5 text-cyan-400" /> create_link_block
+                      </DialogTitle>
+                    </DialogHeader>
 
-                  <form onSubmit={handleCreateLink} className="space-y-4 py-3">
-                    <div className="grid gap-1.5">
-                      <Label htmlFor="link-title" className="text-xs font-semibold text-cyan-400 font-mono">BLOCK_TITLE (링크 제목)</Label>
-                      <Input
-                        id="link-title"
-                        placeholder="예: Github 저장소, 기술 블로그 등"
-                        value={newTitle}
-                        onChange={(e) => setNewTitle(e.target.value)}
-                        required
-                        className="bg-slate-900/60 border-cyan-500/20 text-slate-200 focus-visible:border-cyan-400 text-sm font-mono placeholder:text-slate-600"
-                      />
-                    </div>
-
-                    <div className="grid gap-1.5">
-                      <Label htmlFor="link-url" className="text-xs font-semibold text-cyan-400 font-mono">TARGET_URL (연결 URL)</Label>
-                      <Input
-                        id="link-url"
-                        placeholder="예: github.com/username"
-                        value={newUrl}
-                        onChange={(e) => setNewUrl(e.target.value)}
-                        required
-                        className="bg-slate-900/60 border-cyan-500/20 text-slate-200 focus-visible:border-cyan-400 text-sm font-mono placeholder:text-slate-600"
-                      />
-                    </div>
-
-                    {/* 아이콘 선택 */}
-                    <div className="grid gap-2">
-                      <Label className="text-xs font-semibold text-cyan-400 font-mono">SELECT_BLOCK_ICON (아이콘)</Label>
-                      <div className="grid grid-cols-4 gap-2">
-                        {AVAILABLE_ICONS.map((iconOpt) => (
-                          <button
-                            key={iconOpt.value}
-                            type="button"
-                            onClick={() => setNewIcon(iconOpt.value)}
-                            className={`flex flex-col items-center justify-center p-2 rounded-xl border text-center transition-all cursor-pointer ${
-                              newIcon === iconOpt.value
-                                ? "border-cyan-400 bg-cyan-950/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
-                                : "border-slate-800 bg-slate-900/40 hover:bg-slate-800/40 text-slate-400"
-                            }`}
-                          >
-                            <div className="mb-1">{getIcon(iconOpt.value, iconOpt.color)}</div>
-                            <span className="text-[10px] font-mono tracking-tighter truncate max-w-full">
-                              {iconOpt.label}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <DialogFooter className="flex sm:flex-row gap-2 pt-2 border-t border-cyan-500/10 mt-4">
-                      <DialogClose render={
-                        <Button type="button" variant="outline" className="flex-1 rounded-xl h-9 font-semibold font-mono border-slate-800 hover:bg-slate-900 text-slate-300" />
-                      }>
-                        CANCEL
-                      </DialogClose>
-                      <Button type="submit" className="flex-1 bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold font-mono rounded-xl h-9">
-                        CONFIRM
-                      </Button>
-                    </DialogFooter>
-                  </form>
-                </DialogContent>
-              </Dialog>
-            </div>
-
-            {/* 링크 리스트 카드 */}
-            {links.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-center p-12 border border-dashed border-cyan-500/20 rounded-2xl bg-slate-950/30">
-                <FileText className="w-10 h-10 text-cyan-500/20 mb-3" />
-                <h3 className="text-sm font-semibold text-slate-400 font-mono">database_is_empty</h3>
-                <p className="text-xs text-slate-500 mt-1 max-w-xs leading-relaxed font-mono">
-                  우측 상단의 "ADD_NEW_BLOCK" 버튼을 클릭하여 테크니컬 바로가기 블록을 생성하세요.
-                </p>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {links.map((link, index) => {
-                  const isEditing = link.id === editingLinkId
-
-                  return (
-                    <div
-                      key={link.id}
-                      className={`flex flex-col sm:flex-row items-start sm:items-center p-4 gap-4 bg-slate-900/35 backdrop-blur-xs border rounded-xl transition-all duration-200 group ${
-                        isEditing
-                          ? "border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.1)] bg-slate-900/60"
-                          : "border-cyan-500/10 hover:border-cyan-500/30 hover:shadow-[0_0_15px_rgba(6,182,212,0.06)]"
-                      }`}
-                    >
-                      {/* 상하 이동 순서 제어기 */}
-                      <div className="flex flex-row sm:flex-col gap-1 w-full sm:w-auto items-center justify-between sm:justify-center border-b sm:border-b-0 pb-2 sm:pb-0 border-slate-850">
-                        <div className="flex items-center gap-1 sm:flex-col">
-                          <button
-                            onClick={() => handleMoveUp(index)}
-                            disabled={index === 0 || isEditing}
-                            className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
-                            title="위로 이동"
-                          >
-                            <ArrowUp className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleMoveDown(index)}
-                            disabled={index === links.length - 1 || isEditing}
-                            className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
-                            title="아래로 이동"
-                          >
-                            <ArrowDown className="w-4 h-4" />
-                          </button>
-                        </div>
-
-                        {/* 아이콘 표시 */}
-                        <div className="h-9 w-9 rounded-full bg-slate-950 border border-cyan-500/10 flex items-center justify-center shadow-xs">
-                          {getIcon(link.icon)}
-                        </div>
+                    <form onSubmit={handleCreateLink} className="space-y-4 py-3">
+                      <div className="grid gap-1.5">
+                        <Label htmlFor="link-title" className="text-xs font-semibold text-cyan-400 font-mono">BLOCK_TITLE (링크 제목)</Label>
+                        <Input
+                          id="link-title"
+                          placeholder="예: Github 저장소, 기술 블로그 등"
+                          value={newTitle}
+                          onChange={(e) => setNewTitle(e.target.value)}
+                          required
+                          className="bg-slate-900/60 border-cyan-500/20 text-slate-200 focus-visible:border-cyan-400 text-sm font-mono placeholder:text-slate-600"
+                        />
                       </div>
 
-                      {/* 링크 정보 영역 (인라인 편집 분기) */}
-                      <div className="flex-1 w-full grid gap-2">
-                        {isEditing ? (
-                          /* [편집 상태 뷰] */
-                          <div className="grid gap-2">
-                            <div className="grid gap-1">
-                              <Label className="text-[10px] text-cyan-400 font-mono font-semibold">BLOCK_TITLE (제목)</Label>
-                              <Input
-                                value={tempTitle}
-                                onChange={(e) => setTempTitle(e.target.value)}
-                                placeholder="링크 제목"
-                                className="h-7 text-xs font-semibold bg-slate-955/80 border-cyan-500/30 text-slate-200 focus-visible:border-cyan-400 font-mono shadow-inner rounded-md px-2"
-                              />
-                            </div>
-                            <div className="grid gap-1">
-                              <Label className="text-[10px] text-cyan-400 font-mono font-semibold">TARGET_URL (연결 주소)</Label>
-                              <Input
-                                value={tempUrl}
-                                onChange={(e) => setTempUrl(e.target.value)}
-                                placeholder="https://example.com"
-                                className="h-7 text-xs bg-slate-955/80 border-cyan-500/30 text-cyan-400 focus-visible:border-cyan-400 font-mono shadow-inner rounded-md px-2"
-                              />
-                            </div>
-                          </div>
-                        ) : (
-                          /* [일반 상태 뷰] */
-                          <div className="flex flex-col gap-1.5 text-left">
-                            <h4 className="text-sm font-bold text-slate-200 font-mono transition-colors group-hover:text-cyan-400 leading-tight">
-                              {link.title}
-                            </h4>
-                            <a
-                              href={link.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-cyan-400/80 hover:text-cyan-300 font-mono hover:underline inline-flex items-center gap-1.5 max-w-full truncate"
-                            >
-                              <span className="truncate">{link.url}</span>
-                              <ExternalLink className="w-3 h-3 flex-shrink-0" />
-                            </a>
-                          </div>
-                        )}
+                      <div className="grid gap-1.5">
+                        <Label htmlFor="link-url" className="text-xs font-semibold text-cyan-400 font-mono">TARGET_URL (연결 URL)</Label>
+                        <Input
+                          id="link-url"
+                          placeholder="예: github.com/username"
+                          value={newUrl}
+                          onChange={(e) => setNewUrl(e.target.value)}
+                          required
+                          className="bg-slate-900/60 border-cyan-500/20 text-slate-200 focus-visible:border-cyan-400 text-sm font-mono placeholder:text-slate-600"
+                        />
                       </div>
 
-                      {/* 노출 스위치 및 제어 버튼 영역 */}
-                      <div className="flex items-center justify-between w-full sm:w-auto gap-3.5 pt-2.5 sm:pt-0 border-t sm:border-t-0 border-slate-850">
-                        {isEditing ? (
-                          /* [편집 상태 제어 버튼: 저장/취소] */
-                          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                      {/* 아이콘 선택 */}
+                      <div className="grid gap-2">
+                        <Label className="text-xs font-semibold text-cyan-400 font-mono">SELECT_BLOCK_ICON (아이콘)</Label>
+                        <div className="grid grid-cols-4 gap-2">
+                          {AVAILABLE_ICONS.map((iconOpt) => (
                             <button
-                              onClick={() => handleSaveEdit(link.id)}
-                              className="flex items-center justify-center p-2 rounded-lg bg-emerald-955/30 border border-emerald-500/30 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 hover:border-emerald-400 transition-all cursor-pointer shadow-[0_0_8px_rgba(16,185,129,0.1)]"
-                              title="저장"
+                              key={iconOpt.value}
+                              type="button"
+                              onClick={() => setNewIcon(iconOpt.value)}
+                              className={`flex flex-col items-center justify-center p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                                newIcon === iconOpt.value
+                                  ? "border-cyan-400 bg-cyan-950/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
+                                  : "border-slate-800 bg-slate-900/40 hover:bg-slate-800/40 text-slate-400"
+                              }`}
                             >
-                              <Check className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={handleCancelEdit}
-                              className="flex items-center justify-center p-2 rounded-lg bg-slate-900/60 border border-slate-700/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all cursor-pointer"
-                              title="취소"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          /* [일반 상태 제어 버튼: 수정/토글/삭제] */
-                          <div className="flex items-center gap-3.5 w-full sm:w-auto justify-between sm:justify-end">
-                            
-                            {/* 인라인 수정 모드 진입 버튼 */}
-                            <button
-                              onClick={() => handleStartEdit(link)}
-                              className="p-2 rounded-lg bg-slate-950/60 border border-cyan-500/10 text-slate-400 hover:text-cyan-400 hover:border-cyan-500/30 hover:bg-slate-900 transition-all cursor-pointer"
-                              title="링크 수정"
-                            >
-                              <Edit3 className="w-4 h-4" />
-                            </button>
-
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[10px] text-slate-500 font-bold font-mono">
-                                {link.isActive ? "ON" : "OFF"}
+                              <div className="mb-1">{getIcon(iconOpt.value, iconOpt.color)}</div>
+                              <span className="text-[10px] font-mono tracking-tighter truncate max-w-full">
+                                {iconOpt.label}
                               </span>
-                              <Switch
-                                checked={link.isActive}
-                                onCheckedChange={() => handleToggleLink(link.id, link.isActive)}
-                                aria-label="Toggle link active state"
-                                className="data-checked:bg-cyan-500"
-                              />
-                            </div>
-
-                            {/* 삭제 버튼 (클릭 시 확인 모달 대기상태 돌입) */}
-                            <button
-                              onClick={() => handleDeleteLink(link.id)}
-                              className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer"
-                              title="링크 삭제"
-                            >
-                              <Trash2 className="w-4 h-4" />
                             </button>
-
-                          </div>
-                        )}
+                          ))}
+                        </div>
                       </div>
 
-                    </div>
-                  )
-                })}
+                      <DialogFooter className="flex sm:flex-row gap-2 pt-2 border-t border-cyan-500/10 mt-4">
+                        <DialogClose render={
+                          <Button type="button" variant="outline" className="flex-1 rounded-xl h-9 font-semibold font-mono border-slate-800 hover:bg-slate-900 text-slate-300" />
+                        }>
+                          CANCEL
+                        </DialogClose>
+                        <Button type="submit" className="flex-1 bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold font-mono rounded-xl h-9">
+                          CONFIRM
+                        </Button>
+                      </DialogFooter>
+                    </form>
+                  </DialogContent>
+                </Dialog>
               </div>
-            )}
-          </section>
-        </main>
 
-        {/* 2. 우측 실시간 모바일 프리뷰 */}
+              {/* 링크 리스트 카드 */}
+              {links.length === 0 ? (
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-12 border border-dashed border-cyan-500/20 rounded-2xl bg-slate-955/30">
+                  <FileText className="w-10 h-10 text-cyan-500/20 mb-3" />
+                  <h3 className="text-sm font-semibold text-slate-400 font-mono">database_is_empty</h3>
+                  <p className="text-xs text-slate-500 mt-1 max-w-xs leading-relaxed font-mono">
+                    우측 상단의 "ADD_NEW_BLOCK" 버튼을 클릭하여 나만의 퍼스널 테크 바로가기 블록을 생성하세요.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {links.map((link, index) => {
+                    const isEditing = link.id === editingLinkId
+
+                    return (
+                      <div
+                        key={link.id}
+                        className={`flex flex-col sm:flex-row items-start sm:items-center p-4 gap-4 bg-slate-900/35 backdrop-blur-xs border rounded-xl transition-all duration-200 group ${
+                          isEditing
+                            ? "border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.1)] bg-slate-900/60"
+                            : "border-cyan-500/10 hover:border-cyan-500/30 hover:shadow-[0_0_15px_rgba(6,182,212,0.06)]"
+                        }`}
+                      >
+                        {/* 상하 이동 순서 제어기 */}
+                        <div className="flex flex-row sm:flex-col gap-1 w-full sm:w-auto items-center justify-between sm:justify-center border-b sm:border-b-0 pb-2 sm:pb-0 border-slate-850">
+                          <div className="flex items-center gap-1 sm:flex-col">
+                            <button
+                              onClick={() => handleMoveUp(index)}
+                              disabled={index === 0 || isEditing}
+                              className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
+                              title="위로 이동"
+                            >
+                              <ArrowUp className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleMoveDown(index)}
+                              disabled={index === links.length - 1 || isEditing}
+                              className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
+                              title="아래로 이동"
+                            >
+                              <ArrowDown className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          {/* 아이콘 표시 */}
+                          <div className="h-9 w-9 rounded-full bg-slate-955 border border-cyan-500/10 flex items-center justify-center shadow-xs">
+                            {getIcon(link.icon)}
+                          </div>
+                        </div>
+
+                        {/* 링크 정보 영역 (인라인 편집 분기) */}
+                        <div className="flex-1 w-full grid gap-2">
+                          {isEditing ? (
+                            /* [편집 상태 뷰] */
+                            <div className="grid gap-2">
+                              <div className="grid gap-1">
+                                <Label className="text-[10px] text-cyan-400 font-mono font-semibold">BLOCK_TITLE (제목)</Label>
+                                <Input
+                                  value={tempTitle}
+                                  onChange={(e) => setTempTitle(e.target.value)}
+                                  placeholder="링크 제목"
+                                  className="h-7 text-xs font-semibold bg-slate-955/80 border-cyan-500/30 text-slate-200 focus-visible:border-cyan-400 font-mono shadow-inner rounded-md px-2"
+                                />
+                              </div>
+                              <div className="grid gap-1">
+                                <Label className="text-[10px] text-cyan-400 font-mono font-semibold">TARGET_URL (연결 주소)</Label>
+                                <Input
+                                  value={tempUrl}
+                                  onChange={(e) => setTempUrl(e.target.value)}
+                                  placeholder="https://example.com"
+                                  className="h-7 text-xs bg-slate-955/80 border-cyan-500/30 text-cyan-400 focus-visible:border-cyan-400 font-mono shadow-inner rounded-md px-2"
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            /* [일반 상태 뷰] */
+                            <div className="flex flex-col gap-1.5 text-left">
+                              <h4 className="text-sm font-bold text-slate-200 font-mono transition-colors group-hover:text-cyan-400 leading-tight">
+                                {link.title}
+                              </h4>
+                              <a
+                                href={link.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs text-cyan-400/80 hover:text-cyan-300 font-mono hover:underline inline-flex items-center gap-1.5 max-w-full truncate"
+                              >
+                                <span className="truncate">{link.url}</span>
+                                <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                              </a>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 노출 스위치 및 제어 버튼 영역 */}
+                        <div className="flex items-center justify-between w-full sm:w-auto gap-3.5 pt-2.5 sm:pt-0 border-t sm:border-t-0 border-slate-850">
+                          {isEditing ? (
+                            /* [편집 상태 제어 버튼: 저장/취소] */
+                            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                              <button
+                                onClick={() => handleSaveEdit(link.id)}
+                                className="flex items-center justify-center p-2 rounded-lg bg-emerald-955/30 border border-emerald-500/30 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 hover:border-emerald-400 transition-all cursor-pointer shadow-[0_0_8px_rgba(16,185,129,0.1)]"
+                                title="저장"
+                              >
+                                <Check className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={handleCancelEdit}
+                                className="flex items-center justify-center p-2 rounded-lg bg-slate-900/60 border border-slate-700/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all cursor-pointer"
+                                title="취소"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            /* [일반 상태 제어 버튼: 수정/토글/삭제] */
+                            <div className="flex items-center gap-3.5 w-full sm:w-auto justify-between sm:justify-end">
+                              
+                              {/* 인라인 수정 모드 진입 버튼 */}
+                              <button
+                                onClick={() => handleStartEdit(link)}
+                                className="p-2 rounded-lg bg-slate-950/60 border border-cyan-500/10 text-slate-400 hover:text-cyan-400 hover:border-cyan-500/30 hover:bg-slate-900 transition-all cursor-pointer"
+                                title="링크 수정"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 font-bold font-mono">
+                                  {link.isActive ? "ON" : "OFF"}
+                                </span>
+                                <Switch
+                                  checked={link.isActive}
+                                  onCheckedChange={() => handleToggleLink(link.id, link.isActive)}
+                                  aria-label="Toggle link active state"
+                                  className="data-checked:bg-cyan-500"
+                                />
+                              </div>
+
+                              {/* 삭제 버튼 */}
+                              <button
+                                onClick={() => handleDeleteLink(link.id)}
+                                className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer"
+                                title="링크 삭제"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+
+                            </div>
+                          )}
+                        </div>
+
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
+          </main>
+        )}
+
+        {/* 2. 우측 실시간 모바일 프리뷰 (비로그인 데모 및 로그인 개인화 뷰가 완벽 작동) */}
         <aside className={`w-full md:w-[380px] lg:w-[420px] h-full items-center justify-center bg-slate-950/30 md:border-l border-cyan-500/10 p-6 md:p-8 flex-col ${
           activeTab === "preview" ? "flex" : "hidden md:flex"
         }`}>
           
           <div className="text-center mb-4 hidden md:block">
             <span className="text-[10px] bg-slate-900 border border-cyan-500/25 text-cyan-400 font-semibold font-mono px-3 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_12px_rgba(6,182,212,0.15)]">
-              <Cpu className="w-3.5 h-3.5 animate-spin" /> LIVE_CLOUD_SORT_SYNC
+              <Cpu className="w-3.5 h-3.5 animate-spin" /> {user ? "LIVE_CLOUD_PERSONAL_SYNC" : "LIVE_CLOUD_DEMO_PREVIEW"}
             </span>
           </div>
 
@@ -813,20 +981,8 @@ export default function Page() {
               
               {/* 모바일 프로필 헤더 */}
               <div className="flex flex-col items-center text-center mb-6">
-                <div className="relative w-18 h-18 rounded-full flex items-center justify-center border border-cyan-500/30 p-0.5 shadow-[0_0_12px_rgba(6,182,212,0.2)]">
-                  {profile.avatarUrl ? (
-                    <div className="relative w-full h-full rounded-full overflow-hidden">
-                      <Image
-                        src={profile.avatarUrl}
-                        alt="Dev Avatar"
-                        fill
-                        priority
-                        className="object-cover"
-                      />
-                    </div>
-                  ) : (
-                    <TechAvatar size="sm" />
-                  )}
+                <div className="relative w-18 h-18 rounded-full flex items-center justify-center border border-cyan-500/30 p-0.5 shadow-[0_0_12px_rgba(6,182,212,0.2)] bg-slate-950">
+                  <TechAvatar size="sm" avatarUrl={profile.avatarUrl} />
                 </div>
                 <h3 className="mt-3 font-bold text-base text-slate-100 tracking-tight flex items-center gap-1 font-mono">
                   {profile.name || "dev_name"}
@@ -854,11 +1010,11 @@ export default function Page() {
                       rel="noopener noreferrer"
                       className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-xl transition-all duration-200"
                     >
-                      {/* 네온 글로우 테크 글래스 카드 */}
+                      {/* 네온 글로우 테크 카드 */}
                       <Card className="flex flex-row items-center p-3 gap-3 w-full cursor-pointer transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_0_12px_rgba(6,182,212,0.2)] border border-cyan-500/10 hover:border-cyan-400/40 bg-slate-900/50 backdrop-blur-md shadow-lg">
                         
                         {/* 아이콘 */}
-                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-950 border border-cyan-500/20 text-cyan-400 transition-all duration-300 group-hover:scale-105 group-hover:rotate-6">
+                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-955 border border-cyan-500/20 text-cyan-400 transition-all duration-300 group-hover:scale-105 group-hover:rotate-6">
                           {getIcon(link.icon)}
                         </div>
 
@@ -890,11 +1046,10 @@ export default function Page() {
 
       </div>
 
-      {/* C. 실수 삭제 방지용 프리미엄 UX 삭제 확인 모달 (Wow Factor 2) */}
+      {/* C. 실수 삭제 방지용 프리미엄 UX 삭제 확인 모달 */}
       <Dialog open={deletingLinkId !== null} onOpenChange={(open) => !open && setDeletingLinkId(null)}>
         <DialogContent className="border border-red-500/20 bg-slate-955/95 backdrop-blur-xl shadow-[0_0_35px_rgba(239,68,68,0.15)] rounded-2xl max-w-xs p-5">
           <DialogHeader className="flex flex-col items-center text-center gap-3">
-            {/* 네온 오렌지/레드 경고 삼각 아이콘 */}
             <div className="w-12 h-12 rounded-full bg-red-950/40 border border-red-500/30 flex items-center justify-center shadow-[0_0_15px_rgba(239,68,68,0.2)] animate-bounce">
               <AlertTriangle className="w-6 h-6 text-red-400" />
             </div>
