@@ -39,6 +39,9 @@ import {
   Terminal,
   Cpu,
   Atom,
+  Check,
+  X,
+  AlertTriangle, // 추가됨
 } from "lucide-react"
 
 // Firebase Firestore 관련 기능 임포트
@@ -53,7 +56,7 @@ import {
   query,
   orderBy,
   writeBatch,
-  serverTimestamp, // 추가됨
+  serverTimestamp,
 } from "firebase/firestore"
 
 // Firestore 특화 데이터 모델 정의 (타입 안전성 보장)
@@ -161,6 +164,14 @@ export default function Page() {
   const [newUrl, setNewUrl] = useState("")
   const [newIcon, setNewIcon] = useState("sparkles")
 
+  // 인라인 편집 관련 상태
+  const [editingLinkId, setEditingLinkId] = useState<string | null>(null)
+  const [tempTitle, setTempTitle] = useState("")
+  const [tempUrl, setTempUrl] = useState("")
+
+  // 실수 삭제 방지용 커스텀 모달 상태 (Wow Factor 1)
+  const [deletingLinkId, setDeletingLinkId] = useState<string | null>(null)
+
   // Hydration mismatch 방지 및 Firestore 실시간 동기화 구독
   useEffect(() => {
     setMounted(true)
@@ -170,13 +181,12 @@ export default function Page() {
     const q = query(linksRef, orderBy("createdAt", "desc"))
 
     const unsubscribe = onSnapshot(q, async (snapshot) => {
-      // 1. 만약 데이터가 아예 없다면 dummyLinks를 최초 데이터로 자동 시딩 (createdAt 시간차 시딩)
+      // 1. 만약 데이터가 아예 없다면 dummyLinks를 최초 데이터로 자동 시딩
       if (snapshot.empty) {
         try {
           const batch = writeBatch(db)
           dummyLinks.forEach((link, idx) => {
             const docRef = doc(db, "users/anonymous/links", link.id)
-            // 인스타그램(idx=0)이 가장 최근 생성된 것처럼 보이도록 타임스탬프 역산 계산 (최신순 정렬 시 원래 순서 유지)
             const timeOffset = (dummyLinks.length - idx) * 1000
             batch.set(docRef, {
               id: link.id,
@@ -192,7 +202,7 @@ export default function Page() {
           console.error("Error seeding dummy links to Firestore:", err)
         }
       } else {
-        // 2. 데이터가 존재한다면 상태에 매핑 연동 (실시간 양방향)
+        // 2. 데이터가 존재한다면 상태에 매핑 연동
         const loadedLinks: FirestoreLinkItem[] = []
         snapshot.forEach((docSnapshot) => {
           const data = docSnapshot.data()
@@ -202,7 +212,7 @@ export default function Page() {
             url: data.url || "",
             icon: data.icon || "sparkles",
             isActive: data.isActive !== undefined ? data.isActive : true,
-            createdAt: data.createdAt, // 스왑 정렬에 필요한 타임스탬프 보존
+            createdAt: data.createdAt,
           })
         })
         setLinks(loadedLinks)
@@ -225,7 +235,7 @@ export default function Page() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [resolvedTheme, setTheme])
 
-  // 링크 생성 핸들러 (Create -> serverTimestamp를 이용해 최신순 등록 및 즉각 목록 갱신)
+  // 링크 생성 핸들러 (Create)
   const handleCreateLink = async (e: React.FormEvent) => {
     e.preventDefault()
 
@@ -252,7 +262,7 @@ export default function Page() {
         url: correctedUrl,
         icon: newIcon,
         isActive: true,
-        createdAt: serverTimestamp(), // 서버 기준 타임스탬프 기록 (최신순 쿼리에 즉각 반응)
+        createdAt: serverTimestamp(),
       })
 
       // 폼 초기화 및 다이얼로그 닫기
@@ -277,39 +287,70 @@ export default function Page() {
     }
   }
 
-  // 링크 삭제 핸들러
-  const handleDeleteLink = async (id: string) => {
-    if (!confirm("정말로 이 링크를 삭제하시겠습니까?")) return
+  // 링크 삭제 요청 핸들러 (Delete Request -> 모달 오픈으로 안전장치 가동)
+  const handleDeleteLink = (id: string) => {
+    setDeletingLinkId(id)
+  }
+
+  // 링크 삭제 확정 및 집행 핸들러 (Confirm Delete -> Firestore deleteDoc 연동)
+  const handleConfirmDelete = async () => {
+    if (!deletingLinkId) return
 
     try {
-      await deleteDoc(doc(db, "users/anonymous/links", id))
+      await deleteDoc(doc(db, "users/anonymous/links", deletingLinkId))
+      setDeletingLinkId(null) // 삭제 완료 후 모달 닫기
     } catch (err) {
       console.error("Error deleting link in Firestore:", err)
-      alert("링크 삭제 중 오류가 발생했습니다.")
+      alert("삭제 처리 중 문제가 발생했습니다.")
     }
   }
 
-  // 인라인 텍스트 필드 수정 (Local UI State만 먼저 즉각 반영 - 최상의 타이핑 반응성)
-  const handleLocalUpdateField = (id: string, field: "title" | "url", value: string) => {
-    setLinks(
-      links.map((link) =>
-        link.id === id ? { ...link, [field]: value } : link
-      )
-    )
+  // 인라인 편집 수정 시작 (Start Edit)
+  const handleStartEdit = (link: FirestoreLinkItem) => {
+    setEditingLinkId(link.id)
+    setTempTitle(link.title)
+    setTempUrl(link.url)
   }
 
-  // 인라인 인풋 포커스 아웃 (onBlur) 시점에 Firestore 최종 영구 커밋
-  const handleSaveFieldToFirestore = async (id: string, field: "title" | "url", value: string) => {
+  // 인라인 편집 취소 (Cancel)
+  const handleCancelEdit = () => {
+    setEditingLinkId(null)
+    setTempTitle("")
+    setTempUrl("")
+  }
+
+  // 인라인 편집 저장 (Save)
+  const handleSaveEdit = async (id: string) => {
+    if (!tempTitle.trim()) {
+      alert("링크 제목을 입력해주세요.")
+      return
+    }
+    if (!tempUrl.trim()) {
+      alert("연결할 URL을 입력해주세요.")
+      return
+    }
+
+    let correctedUrl = tempUrl.trim()
+    if (!/^https?:\/\//i.test(correctedUrl)) {
+      correctedUrl = `https://${correctedUrl}`
+    }
+
     try {
       await updateDoc(doc(db, "users/anonymous/links", id), {
-        [field]: value.trim(),
+        title: tempTitle.trim(),
+        url: correctedUrl,
       })
+      
+      setEditingLinkId(null)
+      setTempTitle("")
+      setTempUrl("")
     } catch (err) {
-      console.error(`Error saving ${field} to Firestore:`, err)
+      console.error("Error saving inline edit to Firestore:", err)
+      alert("수정 내역을 저장하는 중 오류가 발생했습니다.")
     }
   }
 
-  // 링크 순서 위로 이동 (Up -> Firestore createdAt 타임스탬프 값을 맞교환하여 최신순 상하 스왑)
+  // 링크 순서 위로 이동 (Up)
   const handleMoveUp = async (index: number) => {
     if (index === 0) return
     try {
@@ -322,7 +363,6 @@ export default function Page() {
       const currentRef = doc(db, "users/anonymous/links", currentLink.id)
       const targetRef = doc(db, "users/anonymous/links", targetLink.id)
 
-      // 최신순(desc) 쿼리 정렬 하에서 두 타임스탬프를 바꾸어 순서 교환 완수 (Wow Factor)
       batch.update(currentRef, { createdAt: targetLink.createdAt })
       batch.update(targetRef, { createdAt: currentLink.createdAt })
 
@@ -332,7 +372,7 @@ export default function Page() {
     }
   }
 
-  // 링크 순서 아래로 이동 (Down -> Firestore createdAt 타임스탬프 값을 맞교환하여 최신순 상하 스왑)
+  // 링크 순서 아래로 이동 (Down)
   const handleMoveDown = async (index: number) => {
     if (index === links.length - 1) return
     try {
@@ -345,7 +385,6 @@ export default function Page() {
       const currentRef = doc(db, "users/anonymous/links", currentLink.id)
       const targetRef = doc(db, "users/anonymous/links", targetLink.id)
 
-      // 두 타임스탬프를 바꾸어 순서 교환 완수 (Wow Factor)
       batch.update(currentRef, { createdAt: targetLink.createdAt })
       batch.update(targetRef, { createdAt: currentLink.createdAt })
 
@@ -394,7 +433,7 @@ export default function Page() {
             <h1 className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-2 font-mono">
               My Link <span className="text-[10px] font-sans bg-cyan-950/60 border border-cyan-500/30 text-cyan-400 font-semibold px-2 py-0.5 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.2)]">Dev Dashboard</span>
             </h1>
-            <p className="text-[11px] text-slate-400 hidden sm:block">파이어베이스 Cloud DB(Firestore) 최신순(createdAt) 정렬 연동 완료</p>
+            <p className="text-[11px] text-slate-400 hidden sm:block">파이어베이스 Cloud DB(Firestore) 실수방지용 커스텀 확인 모달 장착</p>
           </div>
         </div>
 
@@ -402,7 +441,7 @@ export default function Page() {
           {/* 테마 토글 버튼 */}
           <button
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-905/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/25 bg-slate-900/60 backdrop-blur-xs text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:scale-105 active:scale-95 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all duration-200 cursor-pointer"
             aria-label="Toggle Theme"
           >
             {resolvedTheme === "dark" ? (
@@ -438,7 +477,7 @@ export default function Page() {
         </button>
       </div>
 
-      {/* 대시보드 바디 (2분할 레이아웃) */}
+      {/* 대시보드 바디 */}
       <div className="flex-1 w-full max-w-7xl mx-auto flex flex-col md:flex-row h-[calc(100vh-73px)] md:h-[calc(100vh-73px)] overflow-hidden z-10">
         
         {/* 1. 좌측 편집 패널 */}
@@ -517,7 +556,7 @@ export default function Page() {
                   <Plus className="w-4.5 h-4.5" /> ADD_NEW_BLOCK
                 </DialogTrigger>
                 
-                <DialogContent className="border border-cyan-500/20 bg-slate-950/95 backdrop-blur-xl shadow-[0_0_35px_rgba(6,182,212,0.2)] rounded-2xl max-w-sm">
+                <DialogContent className="border border-cyan-500/20 bg-slate-955/95 backdrop-blur-xl shadow-[0_0_35px_rgba(6,182,212,0.2)] rounded-2xl max-w-sm">
                   <DialogHeader>
                     <DialogTitle className="text-lg font-bold text-slate-100 flex items-center gap-2 font-mono border-b border-cyan-500/10 pb-2">
                       <Terminal className="w-5 h-5 text-cyan-400" /> create_link_block
@@ -560,7 +599,7 @@ export default function Page() {
                             onClick={() => setNewIcon(iconOpt.value)}
                             className={`flex flex-col items-center justify-center p-2 rounded-xl border text-center transition-all cursor-pointer ${
                               newIcon === iconOpt.value
-                                ? "border-cyan-400 bg-cyan-955/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
+                                ? "border-cyan-400 bg-cyan-950/20 shadow-[0_0_10px_rgba(6,182,212,0.15)] text-cyan-300"
                                 : "border-slate-800 bg-slate-900/40 hover:bg-slate-800/40 text-slate-400"
                             }`}
                           >
@@ -599,93 +638,155 @@ export default function Page() {
               </div>
             ) : (
               <div className="flex flex-col gap-3">
-                {links.map((link, index) => (
-                  <div
-                    key={link.id}
-                    className="flex flex-col sm:flex-row items-start sm:items-center p-4 gap-4 bg-slate-900/30 backdrop-blur-xs border border-cyan-500/10 rounded-xl hover:border-cyan-500/30 hover:shadow-[0_0_15px_rgba(6,182,212,0.06)] transition-all duration-200 group"
-                  >
-                    
-                    {/* 상하 이동 순서 제어기 */}
-                    <div className="flex flex-row sm:flex-col gap-1 w-full sm:w-auto items-center justify-between sm:justify-center border-b sm:border-b-0 pb-2 sm:pb-0 border-slate-850">
-                      <div className="flex items-center gap-1 sm:flex-col">
-                        <button
-                          onClick={() => handleMoveUp(index)}
-                          disabled={index === 0}
-                          className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
-                          title="위로 이동"
-                        >
-                          <ArrowUp className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleMoveDown(index)}
-                          disabled={index === links.length - 1}
-                          className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
-                          title="아래로 이동"
-                        >
-                          <ArrowDown className="w-4 h-4" />
-                        </button>
+                {links.map((link, index) => {
+                  const isEditing = link.id === editingLinkId
+
+                  return (
+                    <div
+                      key={link.id}
+                      className={`flex flex-col sm:flex-row items-start sm:items-center p-4 gap-4 bg-slate-900/35 backdrop-blur-xs border rounded-xl transition-all duration-200 group ${
+                        isEditing
+                          ? "border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.1)] bg-slate-900/60"
+                          : "border-cyan-500/10 hover:border-cyan-500/30 hover:shadow-[0_0_15px_rgba(6,182,212,0.06)]"
+                      }`}
+                    >
+                      {/* 상하 이동 순서 제어기 */}
+                      <div className="flex flex-row sm:flex-col gap-1 w-full sm:w-auto items-center justify-between sm:justify-center border-b sm:border-b-0 pb-2 sm:pb-0 border-slate-850">
+                        <div className="flex items-center gap-1 sm:flex-col">
+                          <button
+                            onClick={() => handleMoveUp(index)}
+                            disabled={index === 0 || isEditing}
+                            className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
+                            title="위로 이동"
+                          >
+                            <ArrowUp className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleMoveDown(index)}
+                            disabled={index === links.length - 1 || isEditing}
+                            className="p-1 rounded-md text-slate-500 hover:text-cyan-400 hover:bg-slate-850 disabled:opacity-20 disabled:pointer-events-none transition-colors cursor-pointer"
+                            title="아래로 이동"
+                          >
+                            <ArrowDown className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        {/* 아이콘 표시 */}
+                        <div className="h-9 w-9 rounded-full bg-slate-950 border border-cyan-500/10 flex items-center justify-center shadow-xs">
+                          {getIcon(link.icon)}
+                        </div>
                       </div>
 
-                      {/* 아이콘 표시 */}
-                      <div className="h-9 w-9 rounded-full bg-slate-950 border border-cyan-500/10 flex items-center justify-center shadow-xs">
-                        {getIcon(link.icon)}
+                      {/* 링크 정보 영역 (인라인 편집 분기) */}
+                      <div className="flex-1 w-full grid gap-2">
+                        {isEditing ? (
+                          /* [편집 상태 뷰] */
+                          <div className="grid gap-2">
+                            <div className="grid gap-1">
+                              <Label className="text-[10px] text-cyan-400 font-mono font-semibold">BLOCK_TITLE (제목)</Label>
+                              <Input
+                                value={tempTitle}
+                                onChange={(e) => setTempTitle(e.target.value)}
+                                placeholder="링크 제목"
+                                className="h-7 text-xs font-semibold bg-slate-955/80 border-cyan-500/30 text-slate-200 focus-visible:border-cyan-400 font-mono shadow-inner rounded-md px-2"
+                              />
+                            </div>
+                            <div className="grid gap-1">
+                              <Label className="text-[10px] text-cyan-400 font-mono font-semibold">TARGET_URL (연결 주소)</Label>
+                              <Input
+                                value={tempUrl}
+                                onChange={(e) => setTempUrl(e.target.value)}
+                                placeholder="https://example.com"
+                                className="h-7 text-xs bg-slate-955/80 border-cyan-500/30 text-cyan-400 focus-visible:border-cyan-400 font-mono shadow-inner rounded-md px-2"
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          /* [일반 상태 뷰] */
+                          <div className="flex flex-col gap-1.5 text-left">
+                            <h4 className="text-sm font-bold text-slate-200 font-mono transition-colors group-hover:text-cyan-400 leading-tight">
+                              {link.title}
+                            </h4>
+                            <a
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-cyan-400/80 hover:text-cyan-300 font-mono hover:underline inline-flex items-center gap-1.5 max-w-full truncate"
+                            >
+                              <span className="truncate">{link.url}</span>
+                              <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                            </a>
+                          </div>
+                        )}
                       </div>
+
+                      {/* 노출 스위치 및 제어 버튼 영역 */}
+                      <div className="flex items-center justify-between w-full sm:w-auto gap-3.5 pt-2.5 sm:pt-0 border-t sm:border-t-0 border-slate-850">
+                        {isEditing ? (
+                          /* [편집 상태 제어 버튼: 저장/취소] */
+                          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                            <button
+                              onClick={() => handleSaveEdit(link.id)}
+                              className="flex items-center justify-center p-2 rounded-lg bg-emerald-955/30 border border-emerald-500/30 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 hover:border-emerald-400 transition-all cursor-pointer shadow-[0_0_8px_rgba(16,185,129,0.1)]"
+                              title="저장"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="flex items-center justify-center p-2 rounded-lg bg-slate-900/60 border border-slate-700/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all cursor-pointer"
+                              title="취소"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          /* [일반 상태 제어 버튼: 수정/토글/삭제] */
+                          <div className="flex items-center gap-3.5 w-full sm:w-auto justify-between sm:justify-end">
+                            
+                            {/* 인라인 수정 모드 진입 버튼 */}
+                            <button
+                              onClick={() => handleStartEdit(link)}
+                              className="p-2 rounded-lg bg-slate-950/60 border border-cyan-500/10 text-slate-400 hover:text-cyan-400 hover:border-cyan-500/30 hover:bg-slate-900 transition-all cursor-pointer"
+                              title="링크 수정"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] text-slate-500 font-bold font-mono">
+                                {link.isActive ? "ON" : "OFF"}
+                              </span>
+                              <Switch
+                                checked={link.isActive}
+                                onCheckedChange={() => handleToggleLink(link.id, link.isActive)}
+                                aria-label="Toggle link active state"
+                                className="data-checked:bg-cyan-500"
+                              />
+                            </div>
+
+                            {/* 삭제 버튼 (클릭 시 확인 모달 대기상태 돌입) */}
+                            <button
+                              onClick={() => handleDeleteLink(link.id)}
+                              className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer"
+                              title="링크 삭제"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+
+                          </div>
+                        )}
+                      </div>
+
                     </div>
-
-                    {/* 인라인 제목 / URL 텍스트 편집 */}
-                    <div className="flex-1 w-full grid gap-2">
-                      <div className="grid gap-1">
-                        <Input
-                          value={link.title}
-                          onChange={(e) => handleLocalUpdateField(link.id, "title", e.target.value)}
-                          onBlur={(e) => handleSaveFieldToFirestore(link.id, "title", e.target.value)}
-                          placeholder="링크 제목"
-                          className="h-7 text-sm font-semibold border-none hover:bg-slate-850 focus-visible:bg-slate-800 px-1 py-0 shadow-none focus-visible:ring-0 rounded-md text-slate-200 font-mono"
-                        />
-                      </div>
-                      <div className="grid gap-1">
-                        <Input
-                          value={link.url}
-                          onChange={(e) => handleLocalUpdateField(link.id, "url", e.target.value)}
-                          onBlur={(e) => handleSaveFieldToFirestore(link.id, "url", e.target.value)}
-                          placeholder="연결 URL (예: https://example.com)"
-                          className="h-6 text-xs text-cyan-400/80 border-none hover:bg-slate-850 focus-visible:bg-slate-800 px-1 py-0 shadow-none focus-visible:ring-0 rounded-md font-mono"
-                        />
-                      </div>
-                    </div>
-
-                    {/* 노출 스위치 및 삭제 버튼 */}
-                    <div className="flex items-center justify-between w-full sm:w-auto gap-4 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-850">
-                      
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-400 font-semibold font-mono">
-                          {link.isActive ? "ACTIVE" : "HIDDEN"}
-                        </span>
-                        <Switch
-                          checked={link.isActive}
-                          onCheckedChange={() => handleToggleLink(link.id, link.isActive)}
-                          aria-label="Toggle link active state"
-                          className="data-checked:bg-cyan-500"
-                        />
-                      </div>
-
-                      <button
-                        onClick={() => handleDeleteLink(link.id)}
-                        className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer"
-                        title="링크 삭제"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </section>
         </main>
 
-        {/* 2. 우측 실시간 모바일 프리뷰 (Firesotre 실시간 최신순 연동) */}
+        {/* 2. 우측 실시간 모바일 프리뷰 */}
         <aside className={`w-full md:w-[380px] lg:w-[420px] h-full items-center justify-center bg-slate-950/30 md:border-l border-cyan-500/10 p-6 md:p-8 flex-col ${
           activeTab === "preview" ? "flex" : "hidden md:flex"
         }`}>
@@ -707,7 +808,7 @@ export default function Page() {
               <div className="w-10 h-1.5 bg-slate-800 rounded-full" />
             </div>
 
-            {/* 모바일 화면 상단 그라데이션 및 바디 콘텐츠 */}
+            {/* 모바일 화면 상단 콘텐츠 */}
             <div className="flex-1 overflow-y-auto scrollbar-none flex flex-col pt-12 pb-6 px-4 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950">
               
               {/* 모바일 프로필 헤더 */}
@@ -788,6 +889,47 @@ export default function Page() {
         </aside>
 
       </div>
+
+      {/* C. 실수 삭제 방지용 프리미엄 UX 삭제 확인 모달 (Wow Factor 2) */}
+      <Dialog open={deletingLinkId !== null} onOpenChange={(open) => !open && setDeletingLinkId(null)}>
+        <DialogContent className="border border-red-500/20 bg-slate-955/95 backdrop-blur-xl shadow-[0_0_35px_rgba(239,68,68,0.15)] rounded-2xl max-w-xs p-5">
+          <DialogHeader className="flex flex-col items-center text-center gap-3">
+            {/* 네온 오렌지/레드 경고 삼각 아이콘 */}
+            <div className="w-12 h-12 rounded-full bg-red-950/40 border border-red-500/30 flex items-center justify-center shadow-[0_0_15px_rgba(239,68,68,0.2)] animate-bounce">
+              <AlertTriangle className="w-6 h-6 text-red-400" />
+            </div>
+            
+            <DialogTitle className="text-base font-bold text-slate-100 font-mono border-b border-red-500/10 pb-1.5 w-full">
+              system_warning: delete_block
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="py-2 text-center">
+            <p className="text-xs text-slate-300 font-semibold leading-relaxed">
+              정말로 이 링크 블록을 삭제하시겠습니까?
+            </p>
+            <p className="text-[10px] text-slate-500 font-mono mt-1.5 leading-snug">
+              이 작업은 즉시 집행되며 되돌릴 수 없습니다.<br />모바일 랜딩 리스트에서도 즉각 반영 소멸됩니다.
+            </p>
+          </div>
+
+          <DialogFooter className="flex sm:flex-row gap-2 pt-3 border-t border-slate-850 mt-3.5">
+            <button
+              onClick={() => setDeletingLinkId(null)}
+              className="flex-1 py-2 text-xs font-bold font-mono rounded-xl bg-slate-900/60 border border-slate-700/60 hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-all cursor-pointer"
+            >
+              CANCEL
+            </button>
+            <button
+              onClick={handleConfirmDelete}
+              className="flex-1 py-2 text-xs font-bold font-mono rounded-xl bg-red-500 hover:bg-red-600 text-white shadow-[0_0_15px_rgba(239,68,68,0.25)] border-none transition-all duration-200 active:scale-95 cursor-pointer"
+            >
+              DELETE
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
     </div>
   )
 }
