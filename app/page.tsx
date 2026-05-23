@@ -41,7 +41,21 @@ import {
   Atom,
 } from "lucide-react"
 
-// 커스텀 Instagram 아이콘 컴포넌트 (테크 시안 컬러 기본값)
+// Firebase Firestore 관련 기능 임포트
+import { db } from "@/lib/firebase"
+import {
+  collection,
+  doc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  writeBatch,
+} from "firebase/firestore"
+
+// 커스텀 Instagram 아이콘 컴포넌트
 const InstagramIcon = ({ className, ...props }: React.ComponentProps<"svg">) => (
   <svg
     viewBox="0 0 24 24"
@@ -88,7 +102,7 @@ const GithubIcon = ({ className, ...props }: React.ComponentProps<"svg">) => (
   </svg>
 )
 
-// 아이콘 매핑 헬퍼 함수 (테크 시안/블루/에메랄드 조율)
+// 아이콘 매핑 헬퍼 함수
 const getIcon = (iconName: string, activeColorClass?: string) => {
   const iconClass = "h-5 w-5 transition-all duration-300 group-hover:scale-110"
   switch (iconName) {
@@ -124,12 +138,12 @@ export default function Page() {
   const { resolvedTheme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
 
-  // 상태 관리 - 테크 테마용 기본 데이터 세팅
-  const [links, setLinks] = useState<LinkItem[]>(dummyLinks)
+  // 상태 관리 (State Management)
+  const [links, setLinks] = useState<LinkItem[]>([])
   const [profile, setProfile] = useState({
     name: "데브 로그 (DevLog) ⚡",
     bio: "오픈소스 기여, AI 트렌드, 그리고 프론트엔드 아키텍처에 관심이 많은 테크 크리에이터입니다. 최신 정보는 아래 링크에서 확인하세요!",
-    avatarUrl: "" // 비워두어 네온 터미널 아바타 렌더링
+    avatarUrl: ""
   })
 
   // UI 뷰 모드 및 추가 다이얼로그 상태
@@ -141,9 +155,54 @@ export default function Page() {
   const [newUrl, setNewUrl] = useState("")
   const [newIcon, setNewIcon] = useState("sparkles")
 
-  // Hydration mismatch 방지
+  // Hydration mismatch 방지 및 Firestore 실시간 동기화 구독
   useEffect(() => {
     setMounted(true)
+
+    // users/anonymous/links 컬렉션을 order 필드 기준으로 정렬하여 구독
+    const linksRef = collection(db, "users/anonymous/links")
+    const q = query(linksRef, orderBy("order", "asc"))
+
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      // 1. 만약 데이터가 아예 없다면 dummyLinks를 최초 데이터로 자동 시딩 (Wow Factor 1)
+      if (snapshot.empty) {
+        try {
+          const batch = writeBatch(db)
+          dummyLinks.forEach((link, idx) => {
+            const docRef = doc(db, "users/anonymous/links", link.id)
+            batch.set(docRef, {
+              id: link.id,
+              title: link.title,
+              url: link.url,
+              icon: link.icon,
+              isActive: link.isActive,
+              order: idx,
+            })
+          })
+          await batch.commit()
+        } catch (err) {
+          console.error("Error seeding dummy links to Firestore:", err)
+        }
+      } else {
+        // 2. 데이터가 존재한다면 상태에 매핑 연동 (실시간 양방향)
+        const loadedLinks: LinkItem[] = []
+        snapshot.forEach((docSnapshot) => {
+          const data = docSnapshot.data()
+          loadedLinks.push({
+            id: docSnapshot.id,
+            title: data.title || "",
+            url: data.url || "",
+            icon: data.icon || "sparkles",
+            isActive: data.isActive !== undefined ? data.isActive : true,
+          })
+        })
+        setLinks(loadedLinks)
+      }
+    }, (error) => {
+      console.error("Error subscribing to Firestore links:", error)
+    })
+
+    return () => unsubscribe()
   }, [])
 
   // 키보드로 다크 모드 토글 단축키 활성화 (d)
@@ -157,8 +216,8 @@ export default function Page() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [resolvedTheme, setTheme])
 
-  // 링크 생성 핸들러 (Create)
-  const handleCreateLink = (e: React.FormEvent) => {
+  // 링크 생성 핸들러 (Create -> Firestore setDoc 연동)
+  const handleCreateLink = async (e: React.FormEvent) => {
     e.preventDefault()
 
     if (!newTitle.trim()) {
@@ -170,47 +229,70 @@ export default function Page() {
       return
     }
 
-    // URL 프로토콜 누락 시 보정 및 유효성 검사
     let correctedUrl = newUrl.trim()
     if (!/^https?:\/\//i.test(correctedUrl)) {
       correctedUrl = `https://${correctedUrl}`
     }
 
-    const newLink: LinkItem = {
-      id: Date.now().toString(),
-      title: newTitle.trim(),
-      url: correctedUrl,
-      icon: newIcon,
-      isActive: true,
-    }
+    const newId = Date.now().toString()
+    const nextOrder = links.length // 현재 마지막 항목 순서 배정
 
-    setLinks([...links, newLink])
+    try {
+      await setDoc(doc(db, "users/anonymous/links", newId), {
+        id: newId,
+        title: newTitle.trim(),
+        url: correctedUrl,
+        icon: newIcon,
+        isActive: true,
+        order: nextOrder,
+      })
 
-    // 폼 초기화 및 다이얼로그 닫기
-    setNewTitle("")
-    setNewUrl("")
-    setNewIcon("sparkles")
-    setIsAddDialogOpen(false)
-  }
-
-  // 링크 활성화 ON/OFF 토글 핸들러 (Update)
-  const handleToggleLink = (id: string) => {
-    setLinks(
-      links.map((link) =>
-        link.id === id ? { ...link, isActive: !link.isActive } : link
-      )
-    )
-  }
-
-  // 링크 삭제 핸들러 (Delete)
-  const handleDeleteLink = (id: string) => {
-    if (confirm("정말로 이 링크를 삭제하시겠습니까?")) {
-      setLinks(links.filter((link) => link.id !== id))
+      // 폼 초기화 및 다이얼로그 닫기
+      setNewTitle("")
+      setNewUrl("")
+      setNewIcon("sparkles")
+      setIsAddDialogOpen(false)
+    } catch (err) {
+      console.error("Error creating link in Firestore:", err)
+      alert("링크를 데이터베이스에 추가하지 못했습니다.")
     }
   }
 
-  // 링크 필드 수정 핸들러 (인라인 실시간 편집)
-  const handleUpdateLinkField = (id: string, field: "title" | "url", value: string) => {
+  // 링크 활성화 ON/OFF 토글 핸들러 (Update -> Firestore updateDoc 연동)
+  const handleToggleLink = async (id: string, currentActive: boolean) => {
+    try {
+      await updateDoc(doc(db, "users/anonymous/links", id), {
+        isActive: !currentActive,
+      })
+    } catch (err) {
+      console.error("Error updating link active state in Firestore:", err)
+    }
+  }
+
+  // 링크 삭제 핸들러 (Delete -> Firestore deleteDoc 및 order 순서 재인덱싱)
+  const handleDeleteLink = async (id: string) => {
+    if (!confirm("정말로 이 링크를 삭제하시겠습니까?")) return
+
+    try {
+      // 1. 해당 문서 영구 삭제
+      await deleteDoc(doc(db, "users/anonymous/links", id))
+
+      // 2. 삭제 후 남은 링크들의 order 필드를 0부터 다시 순차 매핑하여 인덱싱 일관성 보존 (Wow factor 2)
+      const remainingLinks = links.filter((link) => link.id !== id)
+      const batch = writeBatch(db)
+      remainingLinks.forEach((link, idx) => {
+        const docRef = doc(db, "users/anonymous/links", link.id)
+        batch.update(docRef, { order: idx })
+      })
+      await batch.commit()
+    } catch (err) {
+      console.error("Error deleting link in Firestore:", err)
+      alert("링크 삭제 중 오류가 발생했습니다.")
+    }
+  }
+
+  // 인라인 텍스트 필드 수정 (Local UI State만 먼저 즉각 반영 - 최상의 타이핑 반응성)
+  const handleLocalUpdateField = (id: string, field: "title" | "url", value: string) => {
     setLinks(
       links.map((link) =>
         link.id === id ? { ...link, [field]: value } : link
@@ -218,42 +300,71 @@ export default function Page() {
     )
   }
 
-  // 링크 순서 위로 이동 (Up)
-  const handleMoveUp = (index: number) => {
-    if (index === 0) return
-    const newLinks = [...links]
-    const temp = newLinks[index]
-    newLinks[index] = newLinks[index - 1]
-    newLinks[index - 1] = temp
-    setLinks(newLinks)
+  // 인라인 인풋 포커스 아웃 (onBlur) 시점에 Firestore 최종 영구 커밋 (Wow factor 3 - 성능 최적화)
+  const handleSaveFieldToFirestore = async (id: string, field: "title" | "url", value: string) => {
+    try {
+      await updateDoc(doc(db, "users/anonymous/links", id), {
+        [field]: value.trim(),
+      })
+    } catch (err) {
+      console.error(`Error saving ${field} to Firestore:`, err)
+    }
   }
 
-  // 링크 순서 아래로 이동 (Down)
-  const handleMoveDown = (index: number) => {
+  // 링크 순서 위로 이동 (Up -> Firestore WriteBatch 순서 교환)
+  const handleMoveUp = async (index: number) => {
+    if (index === 0) return
+    try {
+      const batch = writeBatch(db)
+      const currentLink = links[index]
+      const targetLink = links[index - 1]
+
+      const currentRef = doc(db, "users/anonymous/links", currentLink.id)
+      const targetRef = doc(db, "users/anonymous/links", targetLink.id)
+
+      batch.update(currentRef, { order: index - 1 })
+      batch.update(targetRef, { order: index })
+
+      await batch.commit()
+    } catch (err) {
+      console.error("Error moving link up in Firestore:", err)
+    }
+  }
+
+  // 링크 순서 아래로 이동 (Down -> Firestore WriteBatch 순서 교환)
+  const handleMoveDown = async (index: number) => {
     if (index === links.length - 1) return
-    const newLinks = [...links]
-    const temp = newLinks[index]
-    newLinks[index] = newLinks[index + 1]
-    newLinks[index + 1] = temp
-    setLinks(newLinks)
+    try {
+      const batch = writeBatch(db)
+      const currentLink = links[index]
+      const targetLink = links[index + 1]
+
+      const currentRef = doc(db, "users/anonymous/links", currentLink.id)
+      const targetRef = doc(db, "users/anonymous/links", targetLink.id)
+
+      batch.update(currentRef, { order: index + 1 })
+      batch.update(targetRef, { order: index })
+
+      await batch.commit()
+    } catch (err) {
+      console.error("Error moving link down in Firestore:", err)
+    }
   }
 
   // 활성화된 링크만 필터링 (우측 프리뷰 렌더링용)
   const activeLinks = links.filter((link) => link.isActive)
 
-  // 테크 네온 터미널 아바타 컴포넌트 (Wow Factor)
+  // 테크 네온 터미널 아바타 컴포넌트
   const TechAvatar = ({ size = "lg" }: { size?: "sm" | "lg" }) => {
     const isLg = size === "lg"
     return (
       <div className={`relative ${
         isLg ? "w-18 h-18 sm:w-20 sm:h-20" : "w-14 h-14 sm:w-16 sm:h-16"
       } rounded-full bg-slate-950 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.35)] flex items-center justify-center overflow-hidden group/avatar`}>
-        {/* 네온 광원 회전 레이어 */}
         <div className="absolute inset-0 bg-gradient-to-tr from-cyan-500/20 via-transparent to-indigo-500/20 opacity-80 group-hover/avatar:rotate-180 transition-transform duration-1000" />
         <Terminal className={`${
           isLg ? "w-7 h-7 sm:w-8 h-8" : "w-5 h-5 sm:w-6 h-6"
         } text-cyan-400 animate-pulse drop-shadow-[0_0_5px_rgba(34,211,238,0.5)]`} />
-        {/* 미세 그리드 데코 */}
         <div className="absolute inset-0 bg-[linear-gradient(rgba(18,24,38,0.1)_1px,transparent_1px),linear-gradient(90deg,rgba(18,24,38,0.1)_1px,transparent_1px)] bg-[size:4px_4px] pointer-events-none" />
       </div>
     )
@@ -266,7 +377,7 @@ export default function Page() {
   return (
     <div className="relative min-h-screen w-full bg-gradient-to-br from-slate-950 via-zinc-900 to-cyan-950/20 dark:from-slate-950 dark:via-neutral-950 dark:to-cyan-950/30 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-300">
       
-      {/* 테크 배경 미세 노이즈/그리드 패턴 장식 (Wow factor 1) */}
+      {/* 테크 배경 미세 그리드 패턴 장식 */}
       <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.015)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.015)_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none z-0" />
       
       {/* 글로벌 상단 헤더 바 */}
@@ -279,7 +390,7 @@ export default function Page() {
             <h1 className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-2 font-mono">
               My Link <span className="text-[10px] font-sans bg-cyan-950/60 border border-cyan-500/30 text-cyan-400 font-semibold px-2 py-0.5 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.2)]">Dev Dashboard</span>
             </h1>
-            <p className="text-[11px] text-slate-400 hidden sm:block">테크니컬 멀티 링크 페이지를 실시간으로 구성하고 편집합니다</p>
+            <p className="text-[11px] text-slate-400 hidden sm:block">파이어베이스 Cloud DB(Firestore) 실시간 데이터 마이그레이션 완료</p>
           </div>
         </div>
 
@@ -339,7 +450,7 @@ export default function Page() {
             </div>
 
             <div className="flex flex-col sm:flex-row gap-5 items-start sm:items-center">
-              {/* 원형 아바타 (터미널 아바타 장식) */}
+              {/* 원형 아바타 */}
               <div className="flex justify-center w-full sm:w-auto">
                 {profile.avatarUrl ? (
                   <div className="relative w-16 h-16 rounded-full overflow-hidden border border-cyan-500 shadow-md">
@@ -379,7 +490,7 @@ export default function Page() {
                     value={profile.bio}
                     onChange={(e) => setProfile({ ...profile, bio: e.target.value.slice(0, 80) })}
                     placeholder="소개글을 입력하세요"
-                    className="bg-slate-950/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
+                    className="bg-slate-955/60 border-cyan-500/15 text-slate-200 focus-visible:border-cyan-400 text-sm placeholder:text-slate-600"
                   />
                 </div>
               </div>
@@ -391,7 +502,7 @@ export default function Page() {
             <div className="flex items-center justify-between border-b border-cyan-500/10 pb-3">
               <div className="flex items-center gap-2">
                 <Link className="w-5 h-5 text-cyan-400" />
-                <h2 className="text-base font-bold text-slate-200 font-mono">link_block_builder</h2>
+                <h2 className="text-base font-bold text-slate-200 font-mono">link_block_builder (Cloud DB)</h2>
               </div>
 
               {/* 링크 추가 다이얼로그 (Dialog) */}
@@ -522,7 +633,8 @@ export default function Page() {
                       <div className="grid gap-1">
                         <Input
                           value={link.title}
-                          onChange={(e) => handleUpdateLinkField(link.id, "title", e.target.value)}
+                          onChange={(e) => handleLocalUpdateField(link.id, "title", e.target.value)}
+                          onBlur={(e) => handleSaveFieldToFirestore(link.id, "title", e.target.value)}
                           placeholder="링크 제목"
                           className="h-7 text-sm font-semibold border-none hover:bg-slate-850 focus-visible:bg-slate-800 px-1 py-0 shadow-none focus-visible:ring-0 rounded-md text-slate-200 font-mono"
                         />
@@ -530,7 +642,8 @@ export default function Page() {
                       <div className="grid gap-1">
                         <Input
                           value={link.url}
-                          onChange={(e) => handleUpdateLinkField(link.id, "url", e.target.value)}
+                          onChange={(e) => handleLocalUpdateField(link.id, "url", e.target.value)}
+                          onBlur={(e) => handleSaveFieldToFirestore(link.id, "url", e.target.value)}
                           placeholder="연결 URL (예: https://example.com)"
                           className="h-6 text-xs text-cyan-400/80 border-none hover:bg-slate-850 focus-visible:bg-slate-800 px-1 py-0 shadow-none focus-visible:ring-0 rounded-md font-mono"
                         />
@@ -546,7 +659,7 @@ export default function Page() {
                         </span>
                         <Switch
                           checked={link.isActive}
-                          onCheckedChange={() => handleToggleLink(link.id)}
+                          onCheckedChange={() => handleToggleLink(link.id, link.isActive)}
                           aria-label="Toggle link active state"
                           className="data-checked:bg-cyan-500"
                         />
@@ -568,18 +681,18 @@ export default function Page() {
           </section>
         </main>
 
-        {/* 2. 우측 실시간 모바일 프리뷰 (사이버 글래스 테마 장착) */}
+        {/* 2. 우측 실시간 모바일 프리뷰 (Firestore 데이터 실시간 연동) */}
         <aside className={`w-full md:w-[380px] lg:w-[420px] h-full items-center justify-center bg-slate-950/30 md:border-l border-cyan-500/10 p-6 md:p-8 flex-col ${
           activeTab === "preview" ? "flex" : "hidden md:flex"
         }`}>
           
           <div className="text-center mb-4 hidden md:block">
             <span className="text-[10px] bg-slate-900 border border-cyan-500/25 text-cyan-400 font-semibold font-mono px-3 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_12px_rgba(6,182,212,0.15)]">
-              <Cpu className="w-3.5 h-3.5 animate-spin" /> LIVE_CELLULAR_PREVIEW
+              <Cpu className="w-3.5 h-3.5 animate-spin" /> LIVE_CLOUD_DATABASE_SYNC
             </span>
           </div>
 
-          {/* 스마트폰 기기 프레임 데코레이션 (네온 글로우 & 메탈릭 쉘) */}
+          {/* 스마트폰 기기 프레임 */}
           <div className="relative w-[300px] sm:w-[320px] h-[580px] sm:h-[620px] rounded-[42px] border-[10px] border-slate-900 bg-slate-950 shadow-[0_0_35px_rgba(6,182,212,0.12)] flex flex-col justify-between overflow-hidden ring-1 ring-cyan-500/20">
             
             {/* 다이내믹 아일랜드 노치 */}
@@ -618,7 +731,7 @@ export default function Page() {
                 </p>
               </div>
 
-              {/* 활성화된 모바일 링크 목록 (사이버 글래스 카드화) */}
+              {/* 활성화된 모바일 링크 목록 */}
               <div className="flex-1 w-full flex flex-col gap-3">
                 {activeLinks.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-slate-900/40 border border-cyan-500/10 rounded-xl">
@@ -636,7 +749,7 @@ export default function Page() {
                       rel="noopener noreferrer"
                       className="group block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-xl transition-all duration-200"
                     >
-                      {/* 입체적 네온 글로우 테크 글래스 카드 (Wow Factor 2) */}
+                      {/* 네온 글로우 테크 글래스 카드 */}
                       <Card className="flex flex-row items-center p-3 gap-3 w-full cursor-pointer transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_0_12px_rgba(6,182,212,0.2)] border border-cyan-500/10 hover:border-cyan-400/40 bg-slate-900/50 backdrop-blur-md shadow-lg">
                         
                         {/* 아이콘 */}
